@@ -2,42 +2,54 @@ name: Обновление прогноза погоды
 
 on:
   schedule:
-    # 06:00 и 18:00 по Москве (MSK = UTC+3)
-    - cron: '0 3 * * *'   # 06:00 MSK
-    - cron: '0 15 * * *'  # 18:00 MSK
-  workflow_dispatch:       # Ручной запуск через кнопку в GitHub
+    - cron: '0 3 * * *'
+    - cron: '0 15 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  allow-cancel-in-progress: false
 
 jobs:
-  fetch-weather:
+  build-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Клонирование репозитория
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Установка Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
 
       - name: Загрузка прогнозов
         run: node scripts/fetch-weather.mjs --lat 44.7844 --lon 40.1169 --city "Белореченск"
 
-      - name: Копирование данных в out/ (если есть)
-        run: |
-          if [ -d "out" ]; then
-            mkdir -p out/data
-            cp -r data/* out/data/
-            echo "data/ скопирован в out/data/"
-          fi
+      - name: Билд
+        run: npm run build
 
-      - name: Коммит и пуш данных
+      - name: Копирование data в out
+        run: mkdir -p out/data && cp data/*.json out/data/
+
+      - name: Коммит данных в репо
         run: |
           git config user.name "AgroPogoda Bot"
           git config user.email "bot@agropogoda.local"
           git add data/
-          if [ -d "out" ]; then git add out/data/; fi
-          git diff --cached --quiet || (git commit -m "📊 Прогноз погоды $(date -u +%Y-%m-%d\ %H:%M\ UTC)" && git push)
-          echo "Данные обновлены"
+          git diff --cached --quiet || git commit -m "data: $(date -u +%Y-%m-%d)"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
