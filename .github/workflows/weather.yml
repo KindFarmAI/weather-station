@@ -11,10 +11,6 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  allow-cancel-in-progress: false
-
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
