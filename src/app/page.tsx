@@ -1,311 +1,679 @@
 'use client';
-import {useState,useEffect,useCallback,useRef,useMemo} from 'react';
-import{GeoLocation,ForecastSource,ArchiveDay,UserObservation,ForecastSnapshot,WEATHER_PARAMS,DEFAULT_PARAMS,getWeatherDesc,getWeatherEmoji}from'@/lib/types';
-import{searchLocations,fetchECMWF,fetchGFS,fetchICON,fetchYandex,fetchRecentArchive,fetchERA5Archive,formatDate,formatDateFull,getPrecipClass,todayStr,daysAgo,fmt,pbw}from'@/lib/api';
-import{saveLocation,loadLocation,saveParams,loadParams,saveCitySlug,loadCitySlug,loadObs,addObs,delObs,loadSnaps,addSnaps,clearSnaps,gid,expCSV,dlCSV}from'@/lib/storage';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import {
+  GeoLocation, ForecastRow, FactRow, HourlyForecast, ArchiveDay, UserObservation,
+  WEATHER_PARAMS, DEFAULT_PARAMS, POPULAR_CITIES,
+  getWeatherDesc, getWeatherEmoji, WeatherParam,
+} from '@/lib/types';
+import {
+  searchLocations, fetchAllForecasts, fetchHourly, fetchFacts,
+  fetchRecentArchive, fetchERA5Archive,
+} from '@/lib/api';
+import {
+  locId, todayStr, daysAgo, formatDate, formatDateFull, fmt, getPrecipClass, pbw,
+  loadForecastRows, addForecastRows, hasTodaySnapshot,
+  loadFactRows, addFactRows, clearFacts,
+  saveLocation, loadLocation, saveParams, loadParams,
+  loadRecentCities, addRecentCity, loadCitySlug,
+  loadObs, addObs, delObs, gid, expCSV, dlCSV,
+} from '@/lib/storage';
 
-const DL:GeoLocation={name:'Белореченск',lat:44.7844,lon:40.1169,country:'Россия',admin1:'Краснодарский край',displayName:'Белореченск, Краснодарский край, Россия'};
-function es(id:string,nm:string,md:string):ForecastSource{return{id,name:nm,model:md,daily:[],hourly:[],loaded:false,error:null,loading:true};}
+const DL: GeoLocation = {
+  name: 'Белореченск', lat: 44.7844, lon: 40.1169,
+  country: 'Россия', admin1: 'Краснодарский край',
+  displayName: 'Белореченск, Краснодарский край, Россия',
+};
 
-export default function Home(){
-  const[loc,setLoc]=useState<GeoLocation>(DL);
-  const[sq,setSq]=useState('');const[sr,setSr]=useState<GeoLocation[]>([]);const[ssOn,setSsOn]=useState(false);
-  const stR=useRef<NodeJS.Timeout|null>(null);
-  const[tab,setTab]=useState(0);
-  const[srcs,setSrcs]=useState<ForecastSource[]>([es('ecmwf','ECMWF IFS','ecmwf_ifs'),es('gfs','GFS (Windy)','gfs_seamless'),es('icon','ICON-EU','icon_eu'),{id:'yandex',name:'Яндекс',model:'yandex',daily:[],hourly:[],loaded:false,error:null,loading:false}]);
-  const[fcD,setFcD]=useState(7);
-  const[selD,setSelD]=useState<string|null>(null);const[selS,setSelS]=useState<string|null>(null);const[showHr,setShowHr]=useState(false);
-  const[params,setParams]=useState<string[]>(DEFAULT_PARAMS);
-  const[showPS,setShowPS]=useState(false);
-  const[ad,setAd]=useState<ArchiveDay[]>([]);const[adL,setAdL]=useState(false);const[adD,setAdD]=useState(14);
-  const[adS,setAdS]=useState(daysAgo(30));const[adE,setAdE]=useState(daysAgo(0));const[adM,setAdM]=useState<'r'|'c'>('r');
-  const[obs,setObs]=useState<UserObservation[]>([]);const[ofOn,setOfOn]=useState(false);
-  const[of,setOf]=useState({temp:'',humidity:'',precip:'',wind:'',notes:'',date:todayStr()});
-  const[snaps,setSnaps]=useState<ForecastSnapshot[]>([]);
-  const[archFact,setArchFact]=useState<ArchiveDay[]>([]);const[afL,setAfL]=useState(false);
+const SOURCES = [
+  { id: 'ecmwf', name: 'ECMWF IFS', color: 'text-green-700', bg: 'bg-green-600' },
+  { id: 'gfs',   name: 'GFS',       color: 'text-blue-700',  bg: 'bg-blue-600' },
+  { id: 'icon',  name: 'ICON-EU',   color: 'text-purple-700', bg: 'bg-purple-600' },
+  { id: 'yandex', name: 'Яндекс',   color: 'text-yellow-700', bg: 'bg-yellow-500' },
+];
 
-  useEffect(()=>{const l=loadLocation();if(l)setLoc(l as GeoLocation);const p=loadParams();if(p)setParams(p);setObs(loadObs());setSnaps(loadSnaps());},[]);
+function fmtVal(row: ForecastRow, pid: string): string {
+  const p = WEATHER_PARAMS.find(x => x.id === pid);
+  if (!p) return '—';
+  const v = row[p.rowKey] as number | null;
+  if (v == null) return '—';
+  if (pid === 'uvIndexMax') return v.toFixed(1) + (v >= 8 ? ' (опасно)' : v >= 6 ? ' (выс.)' : v >= 3 ? ' (умер.)' : ' (низ.)');
+  if (pid === 'et0') return v.toFixed(1);
+  return fmt(v) + ' ' + p.unit;
+}
 
-  const loadFc=useCallback(async(l:GeoLocation,days:number)=>{
-    setSrcs(p=>p.map(s=>({...s,loaded:false,loading:true,error:null,daily:[],hourly:[]})));
-    const[e,g,ic]=await Promise.all([fetchECMWF(l.lat,l.lon,days),fetchGFS(l.lat,l.lon,days),fetchICON(l.lat,l.lon,Math.min(days,7))]);
-    setSrcs(p=>{const u=[...p];for(const r of[e,g,ic]){const i=u.findIndex(s=>s.id===r.id);if(i>=0)u[i]=r;}return u;});
-    const sl=loadCitySlug()||l.name.toLowerCase().replace(/\s+/g,'-');
-    saveCitySlug(sl);
-    setSrcs(p=>{const u=[...p];const yi=u.findIndex(s=>s.id==='yandex');if(yi>=0)u[yi]={...u[yi],loading:true};return u;});
-    fetchYandex(sl).then(yr=>setSrcs(p=>{const u=[...p];const i=u.findIndex(s=>s.id==='yandex');if(i>=0)u[i]=yr;return u;}));
-  },[]);
+export default function Home() {
+  /* ====== Location ====== */
+  const [loc, setLoc] = useState<GeoLocation>(DL);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [sq, setSq] = useState('');
+  const [sr, setSr] = useState<GeoLocation[]>([]);
+  const sTimer = useRef<NodeJS.Timeout | null>(null);
 
-  useEffect(()=>{loadFc(loc,fcD);},[loc,fcD,loadFc]);
+  /* ====== Data (from storage) ====== */
+  const [rows, setRows] = useState<ForecastRow[]>([]);
+  const [facts, setFacts] = useState<FactRow[]>([]);
+  const [observations, setObservations] = useState<UserObservation[]>([]);
+  const [fetchStatus, setFetchStatus] = useState<'idle' | 'fetching' | 'done' | 'error'>('idle');
+  const [fetchMsg, setFetchMsg] = useState('');
+  const [lastSnap, setLastSnap] = useState('');
 
-  const loadArch=useCallback(async()=>{
-    setAdL(true);setAd([]);let d:ArchiveDay[]=[];
-    if(adM==='r'){d=await fetchRecentArchive(loc.lat,loc.lon,adD);}
-    else{const diff=Math.floor((Date.now()-new Date(adS+'T00:00:00').getTime())/864e5);
-      d=diff<=92?await fetchRecentArchive(loc.lat,loc.lon,diff):await fetchERA5Archive(loc.lat,loc.lon,adS,adE);}
-    setAd(d);setAdL(false);
-  },[loc,adM,adD,adS,adE]);
+  /* ====== UI ====== */
+  const [tab, setTab] = useState(0);
+  const [params, setParams] = useState<string[]>(DEFAULT_PARAMS);
+  const [showPS, setShowPS] = useState(false);
+  const [selDate, setSelDate] = useState<string | null>(null);
+  const [selSource, setSelSource] = useState('ecmwf');
+  const [expandDate, setExpandDate] = useState<string | null>(null);
+  const [hourlyData, setHourlyData] = useState<HourlyForecast[]>([]);
+  const [hourlyLoading, setHourlyLoading] = useState(false);
+  const [showHourly, setShowHourly] = useState(false);
 
-  const saveSnapsNow=()=>{
-    const loaded=srcs.filter(s=>s.loaded&&s.daily.length>0);
-    if(!loaded.length){alert('Нет загруженных прогнозов');return;}
-    const now=new Date().toISOString();
-    const ns:ForecastSnapshot[]=loaded.map(s=>({id:gid(),savedAt:now,sourceId:s.id,sourceName:s.name,
-      forecasts:s.daily.map(d=>({date:d.date,tempMax:d.tempMax,tempMin:d.tempMin,precipSum:d.precipSum,windMax:d.windMax,precipProb:d.precipProb}))}));
-    addSnaps(ns);setSnaps(loadSnaps());
-  };
-  const loadFacts=async()=>{setAfL(true);const d=await fetchRecentArchive(loc.lat,loc.lon,60);setArchFact(d);setAfL(false);};
-  const hSrch=(q:string)=>{setSq(q);if(stR.current)clearTimeout(stR.current);if(q.length<2){setSr([]);return;}
-    stR.current=setTimeout(async()=>{try{setSr(await searchLocations(q));}catch{setSr([]);}},400);};
-  const sLoc=(l:GeoLocation)=>{setLoc(l);saveLocation(l as any);setSq('');setSr([]);setSsOn(false);setSelD(null);setShowHr(false);};
-  const togP=(pid:string)=>setParams(p=>{const n=p.includes(pid)?p.filter(x=>x!==pid):[...p,pid];saveParams(n);return n;});
-  const addO=()=>{if(!of.date)return;
-    addObs({id:gid(),date:of.date,temp:of.temp,humidity:of.humidity,precip:of.precip,wind:of.wind,notes:of.notes,createdAt:new Date().toISOString()});
-    setObs(loadObs());setOf({temp:'',humidity:'',precip:'',wind:'',notes:'',date:todayStr()});setOfOn(false);};
-  const delO=(id:string)=>{delObs(id);setObs(loadObs());};
-  const actS=()=>srcs.find(s=>s.id===(selS||'ecmwf'))||srcs[0];
-  const rpv=(day:any,pid:string)=>{const p=WEATHER_PARAMS.find(x=>x.id===pid);if(!p)return'—';const v=(day as any)[pid];if(v==null)return'—';
-    if(pid==='sunrise'||pid==='sunset'){const d=new Date(v);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
-    if(pid==='uvIndexMax')return v.toFixed(1)+' '+(v>=8?'(опасно)':v>=6?'(выс.)':v>=3?'(умер.)':'(низ.)');
-    if(pid==='et0')return v.toFixed(1)+' '+p.unit;return fmt(v)+' '+p.unit;};
+  /* Archive */
+  const [archData, setArchData] = useState<ArchiveDay[]>([]);
+  const [archL, setArchL] = useState(false);
+  const [archDays, setArchDays] = useState(14);
+  const [archMode, setArchMode] = useState<'r' | 'c'>('r');
+  const [archS, setArchS] = useState(daysAgo(30));
+  const [archE, setArchE] = useState(daysAgo(0));
 
-  const TABS=['Прогноз','Сравнение','Архив','Точность','Наблюдения'];
-  const TIC=['🌡','📊','📅','🎯','📝'];
+  /* Observations form */
+  const [obsOpen, setObsOpen] = useState(false);
+  const [obsForm, setObsForm] = useState({ temp: '', humidity: '', precip: '', wind: '', notes: '', date: todayStr() });
 
-  const accRows = useMemo(() => {
-    if (!snaps.length || !archFact.length) return [];
-    const rows: { date: string; fact: ArchiveDay; forecasts: { name: string; tempMax: number|null; tempMin: number|null; precipSum: number|null; daysBefore: number }[] }[] = [];
-    for (const fact of archFact) {
-      const fcs: typeof rows[0]['forecasts'] = [];
-      for (const snap of snaps) {
-        const fc = snap.forecasts.find(f => f.date === fact.date);
-        if (!fc) continue;
-        const db = Math.round((new Date(fact.date + 'T12:00:00').getTime() - new Date(snap.savedAt).getTime()) / 864e5);
-        fcs.push({ name: snap.sourceName, tempMax: fc.tempMax, tempMin: fc.tempMin, precipSum: fc.precipSum, daysBefore: db });
-      }
-      if (fcs.length) rows.push({ date: fact.date, fact, forecasts: fcs });
+  /* ====== Data lifecycle ====== */
+  const refreshData = useCallback(() => {
+    setRows(loadForecastRows());
+    setFacts(loadFactRows());
+    setObservations(loadObs());
+  }, []);
+
+  const doFetch = useCallback(async (location: GeoLocation, force = false) => {
+    const lid = locId(location);
+    if (!force && hasTodaySnapshot(lid)) {
+      setFetchStatus('done');
+      setFetchMsg('Данные уже загружены сегодня');
+      return;
     }
-    return rows;
-  }, [snaps, archFact]);
+    setFetchStatus('fetching');
+    setFetchMsg('Загрузка прогнозов...');
+    try {
+      const newRows = await fetchAllForecasts(location);
+      if (newRows.length === 0) throw new Error('Нет данных от серверов');
+      addForecastRows(newRows);
+      addRecentCity(location);
+      refreshData();
+      setFetchStatus('done');
+      setFetchMsg(`Сохранено ${newRows.length} записей (${todayStr()})`);
+      setLastSnap(todayStr());
+    } catch (e: any) {
+      setFetchStatus('error');
+      setFetchMsg(e.message || 'Ошибка загрузки');
+    }
+  }, [refreshData]);
 
-  return(
-  <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50">
-    <header className="bg-white shadow-sm border-b border-green-200 sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-3 py-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-xl">🌾</span>
-            <div className="min-w-0">
-              <h1 className="text-base font-bold text-green-800 leading-tight">АгроПогода</h1>
-              <button onClick={()=>setSsOn(!ssOn)} className="text-xs text-green-600 hover:text-green-800 truncate block">
-                📍 {loc.name}{loc.admin1?<span className="text-gray-400">, {loc.admin1}</span>:null} <span className="text-gray-300">✏️</span>
+  /* Init */
+  useEffect(() => {
+    const sl = loadLocation(); if (sl) setLoc(sl);
+    const sp = loadParams(); if (sp) setParams(sp);
+    refreshData();
+  }, [refreshData]);
+
+  /* Auto-fetch on location change */
+  useEffect(() => {
+    if (!loc) return;
+    const lid = locId(loc);
+    const stored = loadForecastRows();
+    const mySnaps = stored.filter(r => r.locationId === lid).map(r => r.snapshotDate);
+    if (mySnaps.length > 0) {
+      const latest = mySnaps.sort().pop()!;
+      setLastSnap(latest);
+      if (latest === todayStr()) { setFetchStatus('done'); setFetchMsg(`Данные от сегодня (${latest})`); }
+      else { setFetchStatus('idle'); setFetchMsg(`Последние данные: ${latest}`); }
+    } else {
+      setLastSnap('');
+      setFetchStatus('idle');
+      setFetchMsg('Нет сохранённых данных для этой локации');
+    }
+    doFetch(loc);
+  }, [loc]);
+
+  /* ====== Computed: latest forecast per date per source ====== */
+  const locRows = useMemo(() => {
+    const lid = locId(loc);
+    return rows.filter(r => r.locationId === lid);
+  }, [rows, loc]);
+
+  const latestByDate = useMemo(() => {
+    const m: Record<string, Record<string, ForecastRow>> = {};
+    for (const row of locRows) {
+      if (!m[row.targetDate]) m[row.targetDate] = {};
+      const existing = m[row.targetDate][row.sourceId];
+      if (!existing || row.daysBefore <= existing.daysBefore) {
+        m[row.targetDate][row.sourceId] = row;
+      }
+    }
+    return m;
+  }, [locRows]);
+
+  const sortedDates = useMemo(() => Object.keys(latestByDate).sort(), [latestByDate]);
+
+  /* ====== Accuracy rows ====== */
+  const accuracyRows = useMemo(() => {
+    const lid = locId(loc);
+    const myFacts = facts.filter(f => f.locationId === lid);
+    if (!myFacts.length || !locRows.length) return [];
+    const out: {
+      date: string; fact: FactRow;
+      predictions: { sourceId: string; sourceName: string; daysBefore: number; tempMax: number|null; precipSum: number|null }[];
+    }[] = [];
+    for (const fact of myFacts) {
+      if (fact.date > todayStr()) continue;
+      const preds = locRows.filter(r => r.targetDate === fact.date)
+        .map(r => ({ sourceId: r.sourceId, sourceName: r.sourceName, daysBefore: r.daysBefore, tempMax: r.tempMax, precipSum: r.precipSum }))
+        .sort((a, b) => a.daysBefore - b.daysBefore);
+      if (preds.length) out.push({ date: fact.date, fact, predictions: preds });
+    }
+    return out;
+  }, [locRows, facts, loc]);
+
+  /* ====== Handlers ====== */
+  const hSearch = (q: string) => {
+    setSq(q);
+    if (sTimer.current) clearTimeout(sTimer.current);
+    if (q.length < 2) { setSr([]); return; }
+    sTimer.current = setTimeout(async () => { try { setSr(await searchLocations(q)); } catch { setSr([]); } }, 350);
+  };
+  const selectCity = (c: GeoLocation) => {
+    setLoc(c); saveLocation(c); setSearchOpen(false); setSq(''); setSr([]);
+    setExpandDate(null); setShowHourly(false);
+  };
+  const togParam = (pid: string) => setParams(p => { const n = p.includes(pid) ? p.filter(x => x !== pid) : [...p, pid]; saveParams(n); return n; });
+  const clickDate = async (date: string) => {
+    setSelDate(date === selDate ? null : date);
+    if (date !== selDate) { setShowHourly(true); setHourlyLoading(true); setHourlyData([]); }
+  };
+  useEffect(() => {
+    if (!showHourly || !selDate) return;
+    setHourlyLoading(true);
+    fetchHourly(loc.lat, loc.lon, selDate).then(d => { setHourlyData(d); setHourlyLoading(false); });
+  }, [selDate, showHourly]);
+
+  /* Archive */
+  const loadArch = async () => {
+    setArchL(true); setArchData([]);
+    let d: ArchiveDay[] = [];
+    if (archMode === 'r') { d = await fetchRecentArchive(loc.lat, loc.lon, archDays); }
+    else {
+      const diff = Math.floor((Date.now() - new Date(archS + 'T00:00:00').getTime()) / 864e5);
+      d = diff <= 92 ? await fetchRecentArchive(loc.lat, loc.lon, diff) : await fetchERA5Archive(loc.lat, loc.lon, archS, archE);
+    }
+    setArchData(d); setArchL(false);
+  };
+
+  /* Facts */
+  const loadFactsNow = async () => {
+    setFetchMsg('Загрузка фактических данных...');
+    const f = await fetchFacts(loc);
+    if (f.length) { addFactRows(f); refreshData(); setFetchMsg(`Загружено ${f.length} фактов`); }
+    else { setFetchMsg('Не удалось загрузить факты'); }
+  };
+
+  /* Observations */
+  const addObsNow = () => {
+    if (!obsForm.date) return;
+    addObs({ id: gid(), date: obsForm.date, temp: obsForm.temp, humidity: obsForm.humidity, precip: obsForm.precip, wind: obsForm.wind, notes: obsForm.notes, createdAt: new Date().toISOString() });
+    setObservations(loadObs());
+    setObsForm({ temp: '', humidity: '', precip: '', wind: '', notes: '', date: todayStr() });
+    setObsOpen(false);
+  };
+
+  /* ====== City search panel ====== */
+  const recentCities = useMemo(() => loadRecentCities(), [searchOpen]);
+  const showSuggestions = searchOpen && (sq.length < 2 ? (recentCities.length > 0 || POPULAR_CITIES.length > 0) : sr.length > 0);
+
+  /* ====== Tabs ====== */
+  const TABS = ['Прогноз', 'Сравнение', 'Точность', 'Архив', 'Наблюдения'];
+  const TIC = ['🌡', '📊', '🎯', '📅', '📝'];
+
+  /* ====== RENDER ====== */
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50">
+      {/* === HEADER === */}
+      <header className="bg-white shadow-sm border-b border-green-200 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xl">🌾</span>
+              <div className="min-w-0">
+                <h1 className="text-base font-bold text-green-800 leading-tight">АгроПогода</h1>
+                <button onClick={() => setSearchOpen(!searchOpen)} className="text-xs text-green-600 hover:text-green-800 truncate block">
+                  📍 {loc.name}{loc.admin1 ? <span className="text-gray-400">, {loc.admin1}</span> : null} <span className="text-gray-300">✏️</span>
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-gray-400">Данные:</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                {rows.filter(r => r.locationId === locId(loc)).length} зап.
+                {lastSnap && <span className="text-green-600 ml-1">→ {lastSnap}</span>}
+              </span>
+              <button onClick={() => doFetch(loc, true)} disabled={fetchStatus === 'fetching'}
+                className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50">
+                {fetchStatus === 'fetching' ? '⏳ Загрузка...' : '📥 Загрузить'}
               </button>
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 mr-1">Срок:</span>
-            {[3,7,10,14].map(d=><button key={d} onClick={()=>{setFcD(d);setSelD(null);setShowHr(false);}} className={'px-2 py-1 rounded-full text-xs font-medium transition '+(fcD===d?'bg-green-600 text-white':'bg-gray-100 text-gray-600 hover:bg-gray-200')}>{d}д</button>)}
-          </div>
-          <button onClick={()=>loadFc(loc,fcD)} className="px-2 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">🔄 Обн.</button>
-        </div>
-        {ssOn&&<div className="mt-2 relative">
-          <input type="text" value={sq} onChange={e=>hSrch(e.target.value)} placeholder="Введите город..." className="w-full px-3 py-2 border-2 border-green-300 rounded-lg focus:outline-none focus:border-green-500 text-sm" autoFocus/>
-          {sr.length>0&&<div className="absolute z-50 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-auto">
-            {sr.map((r,i)=><button key={i} onClick={()=>sLoc(r)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0 block">
-              <div className="font-medium text-gray-800 text-sm">{r.name}</div><div className="text-xs text-gray-500 truncate">{r.displayName}</div></button>)}
+
+          {/* Status message */}
+          {fetchMsg && <div className={'mt-1 text-xs px-2 py-1 rounded ' + (fetchStatus === 'error' ? 'bg-red-50 text-red-600' : fetchStatus === 'done' ? 'bg-green-50 text-green-700' : 'bg-blue-50 text-blue-600')}>
+            {fetchMsg}
           </div>}
-          <button onClick={()=>{setSsOn(false);setSr([]);}} className="absolute right-2 top-2 text-gray-400 hover:text-gray-600 text-sm">✕</button>
-        </div>}
-        <div className="flex mt-2 border-t border-green-100 pt-1 -mx-3 px-3 overflow-x-auto">
-          {TABS.map((t,i)=><button key={i} onClick={()=>{setTab(i);setSelD(null);setShowHr(false);}} className={'tb '+(tab===i?'on':'')}>{TIC[i]} {t}</button>)}
-        </div>
-      </div>
-    </header>
 
-    <main className="max-w-7xl mx-auto px-3 py-3">
-      <div className="mb-3 flex items-center gap-1 flex-wrap">
-        <button onClick={()=>setShowPS(!showPS)} className="text-xs text-green-700 hover:text-green-900 font-medium">⚙️ Парам.({params.length})</button>
-        {params.map(pid=>{const p=WEATHER_PARAMS.find(x=>x.id===pid);return p?<span key={pid} className="pb on">{p.icon}{p.label}<span onClick={()=>togP(pid)} className="ml-0.5 cursor-pointer text-green-400 hover:text-red-500">✕</span></span>:null;})}
-      </div>
-      {showPS&&<div className="mb-3 p-3 bg-white rounded-lg border shadow-sm">
-        <div className="flex flex-wrap gap-1">{WEATHER_PARAMS.map(p=><button key={p.id} onClick={()=>togP(p.id)} className={'pb '+(params.includes(p.id)?'on':'')}>{p.icon}{p.label}<span className="text-xs opacity-50">{p.unit}</span></button>)}</div></div>}
-
-      {/* TAB 0: FORECAST */}
-      {tab===0&&<div>
-        <div className="flex gap-1 mb-3 flex-wrap">
-          {srcs.map(s=><button key={s.id} onClick={()=>{setSelS(s.id);setSelD(null);setShowHr(false);}}
-            className={'px-2 py-1.5 rounded-lg text-xs font-medium transition '+((!selS&&s.id==='ecmwf')||selS===s.id?(s.id==='yandex'?'bg-yellow-500 text-white shadow':'bg-green-600 text-white shadow'):s.loaded?'bg-white text-gray-600 hover:bg-gray-50 border':'bg-gray-100 text-gray-400 border border-dashed')}>
-            {s.loading&&<span className="sp mr-1"/>}{s.name}{s.loaded&&<span className="ml-1 opacity-60">✓</span>}{s.error&&<span className="ml-1" title={s.error}>⚠</span>}
-          </button>)}
-        </div>
-        {(()=>{const s=actS();if(s.loading)return<div className="flex items-center gap-2 p-6"><div className="sp"/>Загрузка {s.name}...</div>;
-          if(s.error&&!s.loaded)return<div className="p-4 bg-red-50 rounded-lg text-red-700 text-sm">Ошибка: {s.error}</div>;
-          if(!s.daily.length)return<div className="p-4 text-gray-400">Нет данных</div>;
-          return<div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-            <table className="dt"><thead><tr><th>Дата</th><th>Погода</th>{params.map(pid=>{const p=WEATHER_PARAMS.find(x=>x.id===pid);return p?<th key={pid}>{p.icon}{p.label}</th>:null;})}</tr></thead>
-            <tbody>{s.daily.map(d=><tr key={d.date} onClick={()=>{setSelD(d.date);setShowHr(true);}} className={'cursor-pointer '+(selD===d.date?'cur':'')}>
-              <td className="font-medium">{formatDate(d.date)}{d.date===todayStr()&&<span className="ml-1 text-xs bg-green-100 text-green-700 px-1 rounded">сег.</span>}</td>
-              <td><span className="mr-0.5">{getWeatherEmoji(d.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(d.weatherCode)}</span></td>
-              {params.map(pid=>pid==='precipSum'?<td key={pid}><div className="flex items-center gap-1"><span className={d.precipSum&&d.precipSum>0?'text-blue-600 font-medium':''}>{fmt(d.precipSum)}</span><div className="pb-bar"><div className={'pb-fill '+getPrecipClass(d.precipSum)} style={{width:pbw(d.precipSum)+'%'}}/></div></div></td>:<td key={pid}>{rpv(d,pid)}</td>)}
-            </tr>)}</tbody></table></div>;})()}
-        {showHr&&selD&&(()=>{const s=actS();if(!s.hourly.length)return<div className="mt-3 p-3 bg-yellow-50 rounded-lg text-yellow-700 text-sm">Почасовые данные недоступны для {s.name}</div>;
-          const hr=s.hourly.filter(h=>h.time.startsWith(selD));if(!hr.length)return null;
-          return<div className="mt-3 bg-white rounded-lg shadow-sm border overflow-x-auto">
-            <div className="px-3 py-2 bg-blue-50 rounded-t-lg border-b flex items-center justify-between">
-              <h3 className="font-semibold text-blue-800 text-sm">📋 Почасовой отчёт: {formatDateFull(selD)}</h3>
-              <button onClick={()=>setShowHr(false)} className="text-gray-400 hover:text-gray-600">✕</button></div>
-            <table className="dt"><thead><tr><th>Время</th><th>🌡Т</th><th>🌧Осадки</th><th>💨Ветер</th><th>💧Влажн.</th><th>📊Давл.</th><th>Погода</th></tr></thead>
-            <tbody>{hr.map((h,i)=><tr key={i}>
-              <td className="font-medium">{h.time.split('T')[1]?.substring(0,5)}</td>
-              <td className={h.temp!=null&&h.temp>30?'text-red-600 font-medium':h.temp!=null&&h.temp<0?'text-blue-600 font-medium':''}>{fmt(h.temp,0)}°C</td>
-              <td className={h.precip&&h.precip>0?'text-blue-600 font-medium':''}>{fmt(h.precip)}мм</td>
-              <td>{fmt(h.windSpeed,0)}км/ч</td>
-              <td>{fmt(h.humidity,0)}%</td>
-              <td>{h.pressure?(h.pressure/100*0.75006).toFixed(1):'—'}мм</td>
-              <td><span className="mr-0.5">{getWeatherEmoji(h.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(h.weatherCode)}</span></td>
-            </tr>)}</tbody></table></div>;})()}
-      </div>}
-
-      {/* TAB 1: COMPARE */}
-      {tab===1&&<div>
-        <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-          {(()=>{
-            const ls=srcs.filter(s=>s.loaded);
-            const srcColors: Record<string,string>={ecmwf:'text-green-700',gfs:'text-blue-700',icon:'text-purple-700',yandex:'text-yellow-700'};
-            return <table className="dt"><thead>
-              <tr><th>Дата</th>{ls.map(s=><th key={s.id} colSpan={params.length} className="text-center"><span className={srcColors[s.id]||''}>{s.name}</span></th>)}</tr>
-              <tr><th></th>{ls.flatMap(s=>params.map(pid=>{const p=WEATHER_PARAMS.find(x=>x.id===pid);return<th key={s.id+'-'+pid} className="text-xs">{p?.label}</th>;}))}</tr>
-            </thead><tbody>
-              {!ls.length?<tr><td colSpan={99} className="text-center p-4 text-gray-400">Загрузка...</td></tr>:
-              Array.from({length:Math.max(...ls.map(s=>s.daily.length))},(_,i)=>{
-                const d0=ls[0].daily[i]?.date;
-                return <tr key={i} onClick={()=>{setSelD(d0||null);setShowHr(true);}} className={'cursor-pointer '+(selD===d0?'cur':'')}>
-                  <td className="font-medium">{d0?formatDate(d0):''}</td>
-                  {ls.map(s=>{const d=s.daily[i];if(!d)return params.map(pid=><td key={s.id+'-'+pid}>—</td>);
-                    return params.map(pid=>{
-                      if(pid==='precipSum') return <td key={s.id+'-'+pid}><span className={d.precipSum&&d.precipSum>0?'text-blue-600 font-medium':''}>{fmt(d.precipSum)}</span></td>;
-                      return <td key={s.id+'-'+pid}>{rpv(d,pid)}</td>;
-                    });})}
-                </tr>;
-              })}
-            </tbody></table>;
-          })()}
-        </div>
-        {selD&&(()=>{const ls=srcs.filter(s=>s.loaded&&s.daily.find(d=>d.date===selD));if(ls.length<2)return null;
-          return<div className="mt-3 bg-white rounded-lg shadow-sm border p-3">
-            <h3 className="font-semibold mb-2 text-gray-700 text-sm">📊 Сводка за {formatDateFull(selD)}</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
-              {['tempMax','tempMin','precipSum','windMax'].filter(p=>params.includes(p)).map(pid=>{
-                const p=WEATHER_PARAMS.find(x=>x.id===pid);const vals=ls.map(s=>{const d=s.daily.find(dd=>dd.date===selD);return{name:s.name,val:d?(d as any)[pid]:null};}).filter(v=>v.val!=null);
-                if(!vals.length)return null;const nv=vals.map(v=>v.val as number);const avg=nv.reduce((a,b)=>a+b,0)/nv.length;
-                return<div key={pid} className="p-2 bg-gray-50 rounded-lg"><div className="text-xs text-gray-500">{p?.icon}{p?.label}</div>
-                  <div className="text-base font-bold">{avg.toFixed(1)} {p?.unit}</div>
-                  <div className="text-xs text-gray-400">Δ: {(Math.max(...nv)-Math.min(...nv)).toFixed(1)}</div>
-                  <div className="mt-1 flex flex-wrap gap-0.5">{vals.map(v=><span key={v.name} className="text-xs px-1 bg-white rounded border">{v.name}: {v.val.toFixed(1)}</span>)}</div></div>;})}
-            </div></div>;})()}
-      </div>}
-
-      {/* TAB 2: ARCHIVE */}
-      {tab===2&&<div>
-        <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-          <div className="flex flex-wrap items-center gap-2 mb-2">
-            <div className="flex gap-1">
-              <button onClick={()=>setAdM('r')} className={'px-2 py-1 rounded text-xs font-medium '+(adM==='r'?'bg-green-600 text-white':'bg-gray-100 text-gray-600')}>Последние</button>
-              <button onClick={()=>setAdM('c')} className={'px-2 py-1 rounded text-xs font-medium '+(adM==='c'?'bg-green-600 text-white':'bg-gray-100 text-gray-600')}>Произвольный</button>
+          {/* City search */}
+          {searchOpen && (
+            <div className="mt-2 relative">
+              <input type="text" value={sq} onChange={e => hSearch(e.target.value)} placeholder="Начните вводить город..."
+                className="w-full px-3 py-2 border-2 border-green-300 rounded-lg focus:outline-none focus:border-green-500 text-sm" autoFocus />
+              {showSuggestions && (
+                <div className="absolute z-50 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-auto">
+                  {sq.length < 2 ? (
+                    <>
+                      {recentCities.length > 0 && (
+                        <div>
+                          <div className="px-3 py-1.5 text-xs text-gray-400 font-medium bg-gray-50 sticky top-0">Недавние</div>
+                          {recentCities.map((c, i) => (
+                            <button key={'r' + i} onClick={() => selectCity(c)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
+                              <div className="font-medium text-gray-800 text-sm">{c.name}</div>
+                              <div className="text-xs text-gray-500 truncate">{c.displayName}</div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div>
+                        <div className="px-3 py-1.5 text-xs text-gray-400 font-medium bg-gray-50 sticky top-0">Популярные города</div>
+                        {POPULAR_CITIES.slice(0, sq.length < 2 && recentCities.length > 0 ? 5 : 10).map((c, i) => (
+                          <button key={'p' + i} onClick={() => selectCity(c)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
+                            <div className="font-medium text-gray-800 text-sm">{c.name}</div>
+                            <div className="text-xs text-gray-500 truncate">{c.displayName}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    sr.map((r, i) => (
+                      <button key={i} onClick={() => selectCity(r)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
+                        <div className="font-medium text-gray-800 text-sm">{r.name}</div>
+                        <div className="text-xs text-gray-500 truncate">{r.displayName}</div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+              <button onClick={() => { setSearchOpen(false); setSq(''); setSr([]); }} className="absolute right-2 top-2 text-gray-400 hover:text-gray-600">✕</button>
             </div>
-            {adM==='r'?<div className="flex items-center gap-1"><span className="text-xs text-gray-500">Дней:</span>{[7,14,30,60,90].map(d=><button key={d} onClick={()=>setAdD(d)} className={'px-2 py-0.5 rounded text-xs '+(adD===d?'bg-green-100 text-green-700 font-medium':'text-gray-500 hover:bg-gray-100')}>{d}</button>)}</div>:
-            <div className="flex items-center gap-1 flex-wrap"><span className="text-xs text-gray-500">С:</span><input type="date" value={adS} onChange={e=>setAdS(e.target.value)} className="px-2 py-1 border rounded text-xs"/><span className="text-xs text-gray-500">По:</span><input type="date" value={adE} onChange={e=>setAdE(e.target.value)} className="px-2 py-1 border rounded text-xs"/></div>}
-            <button onClick={loadArch} className="px-3 py-1 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">{adL?'...':'Загрузить'}</button>
-          </div>
-          <div className="text-xs text-gray-400">ℹ️ {adM==='r'?'ECMWF IFS анализ (~9 км) — ближе к реальным данным станций, чем ERA5.':'ERA5 реанализ (~31 км). Осадки могут быть занижены.'}</div>
-        </div>
-        {adL?<div className="flex items-center gap-2 p-6"><div className="sp"/>Загрузка...</div>:
-        ad.length>0?<div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-          <table className="dt"><thead><tr><th>Дата</th><th>🌡Т макс</th><th>🌡Т мин</th><th>🌧Осадки</th><th>Осадки</th><th>💨Ветер</th><th>Источник</th></tr></thead>
-          <tbody>{[...ad].reverse().map(d=><tr key={d.date} className={'cursor-pointer '+(selD===d.date?'cur':'')} onClick={()=>setSelD(d.date)}>
-            <td className="font-medium">{formatDate(d.date)}</td>
-            <td className={d.tempMax!=null&&d.tempMax>35?'text-red-600 font-medium':''}>{fmt(d.tempMax)}°C</td><td>{fmt(d.tempMin)}°C</td>
-            <td className={d.precipSum!=null&&d.precipSum>0?'text-blue-600 font-bold':''}>{fmt(d.precipSum)}мм</td>
-            <td><div className="pb-bar"><div className={'pb-fill '+getPrecipClass(d.precipSum)} style={{width:pbw(d.precipSum)+'%'}}/></div></td>
-            <td>{fmt(d.windMax,0)}км/ч</td>
-            <td><span className={'text-xs px-1.5 py-0.5 rounded-full '+(d.source==='ecmwf_ifs'?'bg-green-100 text-green-700':'bg-blue-100 text-blue-700')}>{d.source==='ecmwf_ifs'?'ECMWF IFS':'ERA5'}</span></td>
-          </tr>)}</tbody></table>
-          <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600 flex flex-wrap gap-3">
-            <span>{formatDate(ad[0]?.date)} — {formatDate(ad[ad.length-1]?.date)}</span><span>{ad.length} дн.</span>
-            {(()=>{const pp=ad.map(d=>d.precipSum).filter((v):v is number=>v!=null);if(!pp.length)return null;const t=pp.reduce((a,b)=>a+b,0);
-              return<><span>Σ:{t.toFixed(1)}мм</span><span>Макс:{Math.max(...pp).toFixed(1)}мм</span><span>Ср/дн:{(t/pp.length).toFixed(1)}мм</span></>;})()}
-          </div></div>:<div className="p-6 text-center text-gray-400">Нажмите «Загрузить»</div>}
-      </div>}
+          )}
 
-      {/* TAB 3: ACCURACY */}
-      {tab===3&&<div>
-        <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-          <div className="flex flex-wrap items-center gap-2 mb-2">
-            <button onClick={saveSnapsNow} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">💾 Сохранить прогноз</button>
-            <button onClick={loadFacts} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">{afL?'...':'📊 Загрузить факты (60 дн.)'}</button>
-            {snaps.length>0&&<button onClick={()=>{if(confirm('Удалить все снапшоты?')){clearSnaps();setSnaps([]);}}} className="px-2 py-1 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200">🗑 Очистить</button>}
-            <span className="text-xs text-gray-400">Снапшотов: {snaps.length} | Фактов: {archFact.length}</span>
+          {/* Tabs */}
+          <div className="flex mt-2 border-t border-green-100 pt-1 -mx-3 px-3 overflow-x-auto">
+            {TABS.map((t, i) => (
+              <button key={i} onClick={() => { setTab(i); setSelDate(null); setShowHourly(false); setExpandDate(null); }}
+                className={'tb ' + (tab === i ? 'on' : '')}>{TIC[i]} {t}</button>
+            ))}
           </div>
-          <div className="text-xs text-gray-500 leading-relaxed">
-            💡 <strong>Как пользоваться:</strong> Каждый день нажимайте «Сохранить прогноз» — система запомнит прогнозы всех моделей. Когда появятся фактические данные, нажмите «Загрузить факты» — вы увидите таблицу сравнения. Чем ближе к дате — тем точнее прогноз.
-          </div>
-          {snaps.length>0&&<div className="mt-2 text-xs text-gray-400">Последний: {new Date(snaps[snaps.length-1].savedAt).toLocaleString('ru')} ({snaps[snaps.length-1].sourceName})</div>}
         </div>
-        {accRows.length>0?<div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-          <table className="dt"><thead>
-            <tr><th>Дата</th><th>Факт Тмакс</th><th>Факт Тмин</th><th>Факт Осадки</th>{Array.from(new Set(snaps.map(s=>s.sourceName))).map(nm=><th key={nm} colSpan={3} className="text-center text-xs">{nm}</th>)}</tr>
-            <tr><th></th><th></th><th></th><th></th>{Array.from(new Set(snaps.map(s=>s.sourceName))).flatMap(()=>[<th className="text-xs">Прогн.Т</th>,<th className="text-xs">ΔТ</th>,<th className="text-xs">Пр/Факт</th>])}</tr>
-          </thead><tbody>
-            {accRows.map(row=>{const srcs=Array.from(new Set(snaps.map(s=>s.sourceName)));
-              return<tr key={row.date}>
-                <td className="font-medium">{formatDate(row.date)}</td>
-                <td>{fmt(row.fact.tempMax,0)}°C</td><td>{fmt(row.fact.tempMin,0)}°C</td>
-                <td className={row.fact.precipSum&&row.fact.precipSum>0?'text-blue-600 font-bold':''}>{fmt(row.fact.precipSum)}мм</td>
-                {srcs.flatMap(nm=>{const fcs=row.forecasts.filter(f=>f.name===nm).sort((a:any,b:any)=>Math.abs(a.daysBefore)-Math.abs(b.daysBefore));const fc=fcs[0];
-                  if(!fc)return[<td key={nm+'t'}>—</td>,<td key={nm+'d'}>—</td>,<td key={nm+'p'}>—</td>];
-                  const eT=fc.tempMax!=null&&row.fact.tempMax!=null?fc.tempMax-row.fact.tempMax:null;
-                  const eTc=eT!=null?(Math.abs(eT)<=2?'err-pos':Math.abs(eT)<=4?'err-warn':'err-bad'):'';
-                  return[<td key={nm+'t'}>{fc.tempMax!=null?fc.tempMax.toFixed(0):'—'}</td>,
-                    <td key={nm+'d'} className={eTc}>{eT!=null?(eT>0?'+':'')+eT.toFixed(1):'—'}{fc.daysBefore>0&&<span className="text-gray-300 text-xs ml-0.5">({fc.daysBefore}д)</span>}</td>,
-                    <td key={nm+'p'}>{fc.precipSum!=null?fc.precipSum.toFixed(1):'—'}<span className="text-gray-300">/{row.fact.precipSum?.toFixed(1)??'?'}</span></td>];})}
-              </tr>;})}
-          </tbody></table>
-          {(()=>{const rows=accRows;if(!rows.length)return null;let sTE=0,sPC=0,nT=0,nP=0;
-            for(const r of rows)for(const f of r.forecasts){if(f.tempMax!=null&&r.fact.tempMax!=null){sTE+=Math.abs(f.tempMax-r.fact.tempMax);nT++;}
-              if(f.precipSum!=null&&r.fact.precipSum!=null){sPC+=f.precipSum-r.fact.precipSum;nP++;}}
-            return<div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600 flex flex-wrap gap-4">
-              {nT>0&&<span>MAE Т макс: <strong>{(sTE/nT).toFixed(1)}°C</strong></span>}
-              {nP>0&&<span>Смещ. осадков: <strong>{(sPC/nP).toFixed(1)}мм</strong> ({sPC>0?'завышение':'занижение'})</span>}
-            </div>;})()}
-        </div>:<div className="p-6 text-center text-gray-400">{snaps.length===0?'Сохраните прогноз, чтобы начать оценку':'Загрузите фактические данные'}</div>}
-      </div>}
+      </header>
 
-      {/* TAB 4: OBSERVATIONS */}
-      {tab===4&&<div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex gap-2">
-            <button onClick={()=>setOfOn(!ofOn)} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">➕ Добавить</button>
-            {obs.length>0&&<button onClick={()=>dlCSV(expCSV(obs),'obs_'+todayStr()+'.csv')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">📥 CSV</button>}
-          </div><span className="text-xs text-gray-400">{obs.length} зап.</span>
+      <main className="max-w-7xl mx-auto px-3 py-3">
+        {/* === PARAM BAR === */}
+        <div className="mb-3 flex items-center gap-1 flex-wrap">
+          <button onClick={() => setShowPS(!showPS)} className="text-xs text-green-700 hover:text-green-900 font-medium">⚙️ Парам. ({params.length})</button>
+          {params.map(pid => {
+            const p = WEATHER_PARAMS.find(x => x.id === pid);
+            return p ? (
+              <span key={pid} className="pb on">{p.icon}{p.label}<span onClick={() => togParam(pid)} className="ml-0.5 cursor-pointer text-green-400 hover:text-red-500">✕</span></span>
+            ) : null;
+          })}
         </div>
-        {ofOn&&<div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
-            {[{k:'date',l:'Дата',t:'date'},{k:'temp',l:'🌡 Т(°C)',t:'text'},{k:'humidity',l:'💧 Влажн.(%)',t:'text'},{k:'precip',l:'🌧 Осадки(мм)',t:'text'},{k:'wind',l:'💨 Ветер(м/с)',t:'text'},{k:'notes',l:'📝 Прим.',t:'text'}].map(f=>
-              <div key={f.k}><label className="text-xs text-gray-500 block mb-0.5">{f.l}</label>
-              <input type={f.t} value={(of as any)[f.k]} onChange={e=>setOf(p=>({...p,[f.k]:e.target.value}))} className="w-full px-2 py-1.5 border rounded text-xs"/></div>)}
+        {showPS && (
+          <div className="mb-3 p-3 bg-white rounded-lg border shadow-sm">
+            <div className="text-xs text-gray-500 mb-2">Выберите параметры для отображения (изменяется только визуал, данные сохранены полностью):</div>
+            <div className="flex flex-wrap gap-1">
+              {WEATHER_PARAMS.map(p => (
+                <button key={p.id} onClick={() => togParam(p.id)} className={'pb ' + (params.includes(p.id) ? 'on' : '')}>
+                  {p.icon}{p.label}<span className="text-xs opacity-50">{p.unit}</span>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="mt-2 flex gap-2"><button onClick={addO} className="px-3 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700">Сохранить</button><button onClick={()=>setOfOn(false)} className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-xs font-medium">Отмена</button></div>
-        </div>}
-        {obs.length>0?<div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-          <table className="dt"><thead><tr><th>Дата</th><th>🌡Т</th><th>💧Вл.</th><th>🌧Ос</th><th>💨В</th><th>Прим.</th><th></th></tr></thead>
-          <tbody>{obs.map(o=><tr key={o.id}><td className="font-medium">{formatDate(o.date)}</td><td>{o.temp||'—'}</td><td>{o.humidity||'—'}</td><td className={parseFloat(o.precip)>0?'text-blue-600 font-medium':''}>{o.precip||'—'}</td><td>{o.wind||'—'}</td><td className="text-xs text-gray-500 max-w-xs truncate">{o.notes||'—'}</td><td><button onClick={()=>delO(o.id)} className="text-red-400 hover:text-red-600">🗑</button></td></tr>)}</tbody></table>
-        </div>:<div className="p-6 text-center text-gray-400">Нет наблюдений</div>}
-      </div>}
+        )}
 
-      <footer className="mt-6 py-3 text-center text-xs text-gray-400 border-t">
-        <p>АгроПогода — ECMWF IFS, GFS, ICON-EU, ERA5 (Open-Meteo)</p>
-        <p>{loc.lat.toFixed(4)}°N, {loc.lon.toFixed(4)}°E</p>
-      </footer>
-    </main>
-  </div>);
+        {/* ====== TAB 0: FORECAST ====== */}
+        {tab === 0 && (
+          <div>
+            {/* Source selector */}
+            <div className="flex gap-1 mb-3 flex-wrap">
+              {SOURCES.map(s => (
+                <button key={s.id} onClick={() => { setSelSource(s.id); setExpandDate(null); }}
+                  className={'px-2 py-1.5 rounded-lg text-xs font-medium transition ' + (selSource === s.id ? s.bg + ' text-white shadow' : 'bg-white text-gray-600 hover:bg-gray-50 border')}>
+                  {s.name}
+                </button>
+              ))}
+              <button onClick={() => setExpandDate(expandDate ? null : (sortedDates[0] || null))}
+                className="px-2 py-1.5 rounded-lg text-xs font-medium transition bg-gray-100 text-gray-600 hover:bg-gray-200 border border-dashed">
+                {expandDate ? '🔀 Свернуть' : '📋 История прогнозов'}
+              </button>
+            </div>
+
+            {sortedDates.length === 0 ? (
+              <div className="p-6 text-center text-gray-400">
+                {fetchStatus === 'fetching' ? <div className="flex items-center justify-center gap-2"><div className="sp" />Загрузка...</div> : 'Нет данных. Нажмите "Загрузить" для получения прогноза.'}
+              </div>
+            ) : (
+              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <table className="dt">
+                  <thead>
+                    <tr>
+                      <th>Дата</th><th>Погода</th><th>Д-до</th>
+                      {params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.icon}{p.label}</th> : null; })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedDates.map(date => {
+                      const row = latestByDate[date]?.[selSource];
+                      if (!row) return null;
+                      const isExpanded = expandDate === date;
+                      return (
+                        <tbody key={date}>
+                          <tr onClick={() => setExpandDate(isExpanded ? null : date)} className={isExpanded ? 'cur' : 'cursor-pointer hover:bg-gray-50'}>
+                            <td className="font-medium">{formatDate(date)}{date === todayStr() && <span className="ml-1 text-xs bg-green-100 text-green-700 px-1 rounded">сег.</span>}</td>
+                            <td><span className="mr-0.5">{getWeatherEmoji(row.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(row.weatherCode)}</span></td>
+                            <td className="text-xs text-gray-400">{row.daysBefore >= 0 ? row.daysBefore + 'д' : '—'}</td>
+                            {params.map(pid => {
+                              if (pid === 'precipSum') {
+                                return (<td key={pid}><div className="flex items-center gap-1"><span className={row.precipSum && row.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(row.precipSum)}</span><div className="pb-bar"><div className={'pb-fill ' + getPrecipClass(row.precipSum)} style={{ width: pbw(row.precipSum) + '%' }} /></div></div></td>);
+                              }
+                              return <td key={pid}>{fmtVal(row, pid)}</td>;
+                            })}
+                          </tr>
+                          {/* Expanded: history of predictions for this date */}
+                          {isExpanded && (() => {
+                            const history = locRows.filter(r => r.targetDate === date).sort((a, b) => a.daysBefore - b.daysBefore);
+                            if (history.length <= 1) return <tr><td colSpan={3 + params.length} className="text-center text-xs text-gray-400 py-2">Только одно наблюдение за эту дату</td></tr>;
+                            return (
+                              <tr>
+                                <td colSpan={3 + params.length} className="p-0">
+                                  <div className="bg-blue-50/50 border-t border-blue-200">
+                                    <div className="px-3 py-1.5 text-xs text-blue-700 font-medium">История прогнозов на {formatDateFull(date)} ({SOURCES.find(s => s.id === selSource)?.name})</div>
+                                    <table className="dt">
+                                      <thead><tr><th>Когда сохранено</th><th>Дней до даты</th>{params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.label}</th> : null; })}</tr></thead>
+                                      <tbody>
+                                        {history.filter(r => r.sourceId === selSource).map(r => (
+                                          <tr key={r.id} className={r.snapshotDate === todayStr() ? 'bg-green-50' : ''}>
+                                            <td className="text-xs">{formatDate(r.snapshotDate)}{r.snapshotDate === todayStr() && <span className="ml-1 text-green-600">→ сегодня</span>}</td>
+                                            <td className="text-xs text-center">{r.daysBefore >= 0 ? r.daysBefore + 'д' : (Math.abs(r.daysBefore) + 'д после')}</td>
+                                            {params.map(pid => {
+                                              if (pid === 'precipSum') return <td key={pid}><span className={r.precipSum && r.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(r.precipSum)}</span></td>;
+                                              return <td key={pid}>{fmtVal(r, pid)}</td>;
+                                            })}
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })()}
+                        </tbody>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-500">
+                  Показаны последние прогнозы · {sortedDates.length} дней · {SOURCES.find(s => s.id === selSource)?.name}
+                </div>
+              </div>
+            )}
+
+            {/* Hourly */}
+            {showHourly && selDate && (
+              <div className="mt-3 bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <div className="px-3 py-2 bg-blue-50 rounded-t-lg border-b flex items-center justify-between">
+                  <h3 className="font-semibold text-blue-800 text-sm">📋 Почасовой отчёт: {formatDateFull(selDate)}</h3>
+                  <button onClick={() => setShowHourly(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+                </div>
+                {hourlyLoading ? <div className="p-4 text-center"><div className="sp" /> Загрузка...</div> : hourlyData.length === 0 ? <div className="p-4 text-center text-gray-400">Нет почасовых данных</div> : (
+                  <table className="dt">
+                    <thead><tr><th>Время</th><th>🌡 Т</th><th>🌧 Осадки</th><th>💨 Ветер</th><th>💧 Влажн.</th><th>📊 Давл.</th><th>Погода</th></tr></thead>
+                    <tbody>{hourlyData.filter(h => h.time.startsWith(selDate)).map((h, i) => (
+                      <tr key={i}>
+                        <td className="font-medium">{h.time.split('T')[1]?.substring(0, 5)}</td>
+                        <td className={h.temp != null && h.temp > 30 ? 'text-red-600 font-medium' : h.temp != null && h.temp < 0 ? 'text-blue-600 font-medium' : ''}>{fmt(h.temp, 0)}°C</td>
+                        <td className={h.precip && h.precip > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(h.precip)}мм</td>
+                        <td>{fmt(h.windSpeed, 0)}км/ч</td>
+                        <td>{fmt(h.humidity, 0)}%</td>
+                        <td>{h.pressure ? (h.pressure / 100 * 0.75006).toFixed(1) : '—'}мм</td>
+                        <td><span className="mr-0.5">{getWeatherEmoji(h.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(h.weatherCode)}</span></td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ====== TAB 1: COMPARE ====== */}
+        {tab === 1 && (
+          <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+            {sortedDates.length === 0 ? (
+              <div className="p-6 text-center text-gray-400">Нет данных</div>
+            ) : (
+              <table className="dt">
+                <thead>
+                  <tr><th>Дата</th>{SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).map(s => (
+                    <th key={s.id} colSpan={params.length} className="text-center"><span className={s.color}>{s.name}</span></th>
+                  ))}</tr>
+                  <tr><th></th>{SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).flatMap(s =>
+                    params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return <th key={s.id + '-' + pid} className="text-xs">{p?.label}</th>; })
+                  )}</tr>
+                </thead>
+                <tbody>
+                  {sortedDates.map(date => (
+                    <tr key={date} onClick={() => clickDate(date)} className={'cursor-pointer ' + (selDate === date ? 'cur' : '')}>
+                      <td className="font-medium">{formatDate(date)}</td>
+                      {SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).map(s => {
+                        const row = latestByDate[date]?.[s.id];
+                        if (!row) return params.map(pid => <td key={s.id + '-' + pid}>—</td>);
+                        return params.map(pid => {
+                          if (pid === 'precipSum') return <td key={s.id + '-' + pid}><span className={row.precipSum && row.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(row.precipSum)}</span></td>;
+                          return <td key={s.id + '-' + pid}>{fmtVal(row, pid)}</td>;
+                        });
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {/* ====== TAB 2: ACCURACY ====== */}
+        {tab === 2 && (
+          <div>
+            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <button onClick={loadFactsNow} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">📊 Загрузить факты (60 дн.)</button>
+                {facts.length > 0 && <button onClick={() => { if (confirm('Удалить фактические данные?')) { clearFacts(); refreshData(); } }} className="px-2 py-1 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200">🗑 Очистить</button>}
+                <span className="text-xs text-gray-400">Фактов: {facts.filter(f => f.locationId === locId(loc)).length} | Прогнозов: {locRows.length}</span>
+              </div>
+              <div className="text-xs text-gray-500 leading-relaxed">
+                <strong>Как это работает:</strong> Каждый день при открытии приложения прогнозы автоматически сохраняются. Для каждой даты накапливается до 10 прогнозов (с 10-дневного до 0-дневного срока). Загрузив фактические данные, вы увидите как менялась точность прогноза по мере приближения к дате.
+              </div>
+            </div>
+
+            {accuracyRows.length > 0 ? (
+              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <table className="dt">
+                  <thead>
+                    <tr><th>Дата</th><th>Факт Тмакс</th><th>Факт Осадки</th><th>Источник</th><th>Дней до</th><th>Прогн.Т</th><th>ΔТ</th><th>Пр/Факт</th></tr>
+                  </thead>
+                  <tbody>
+                    {accuracyRows.map(row => (
+                      row.predictions.map((pred, i) => (
+                        <tr key={row.date + '-' + i}>
+                          {i === 0 && <td rowSpan={row.predictions.length} className="font-medium">{formatDate(row.date)}</td>}
+                          {i === 0 && <td rowSpan={row.predictions.length}>{fmt(row.fact.tempMax, 0)}°C</td>}
+                          {i === 0 && <td rowSpan={row.predictions.length} className={row.fact.precipSum && row.fact.precipSum > 0 ? 'text-blue-600 font-bold' : ''}>{fmt(row.fact.precipSum)}мм</td>}
+                          <td className="text-xs">{pred.sourceName}</td>
+                          <td className="text-xs text-center">{pred.daysBefore >= 0 ? pred.daysBefore + 'д' : '—'}</td>
+                          <td>{pred.tempMax != null ? pred.tempMax.toFixed(1) : '—'}</td>
+                          <td className={(() => {
+                            if (pred.tempMax == null || row.fact.tempMax == null) return '';
+                            const e = Math.abs(pred.tempMax - row.fact.tempMax);
+                            return e <= 2 ? 'err-pos' : e <= 4 ? 'err-warn' : 'err-bad';
+                          })()}>
+                            {pred.tempMax != null && row.fact.tempMax != null ? ((pred.tempMax > row.fact.tempMax ? '+' : '') + (pred.tempMax - row.fact.tempMax).toFixed(1)) : '—'}
+                          </td>
+                          <td>
+                            <span className="text-gray-500">{pred.precipSum != null ? pred.precipSum.toFixed(1) : '—'}</span>
+                            <span className="text-gray-300">/</span>
+                            <span className="font-medium">{row.fact.precipSum?.toFixed(1) ?? '?'}</span>
+                          </td>
+                        </tr>
+                      ))
+                    ))}
+                  </tbody>
+                </table>
+                {/* Summary */}
+                {(() => {
+                  let sTE = 0, nT = 0, sPE = 0, nP = 0;
+                  const buckets: Record<string, { sTE: number; nT: number }> = {};
+                  for (const row of accuracyRows) {
+                    for (const pred of row.predictions) {
+                      const bk = Math.min(10, Math.max(0, pred.daysBefore)) + 'д';
+                      if (!buckets[bk]) buckets[bk] = { sTE: 0, nT: 0 };
+                      if (pred.tempMax != null && row.fact.tempMax != null) {
+                        const e = Math.abs(pred.tempMax - row.fact.tempMax);
+                        sTE += e; nT++;
+                        buckets[bk].sTE += e; buckets[bk].nT++;
+                      }
+                      if (pred.precipSum != null && row.fact.precipSum != null) { sPE += pred.precipSum - row.fact.precipSum; nP++; }
+                    }
+                  }
+                  if (nT === 0) return null;
+                  return (
+                    <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600">
+                      <span>MAE Т макс: <strong>{(sTE / nT).toFixed(1)}°C</strong></span>
+                      {nP > 0 && <span className="ml-3">Смещ. осадков: <strong>{(sPE / nP).toFixed(1)}мм</strong> ({sPE > 0 ? 'завышение' : 'занижение'})</span>}
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {Object.entries(buckets).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => (
+                          <span key={k} className="px-1.5 py-0.5 bg-white rounded border">{k}: {v.nT > 0 ? (v.sTE / v.nT).toFixed(1) + '°C' : '—'}</span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : (
+              <div className="p-6 text-center text-gray-400">{locRows.length === 0 ? 'Сначала загрузите прогноз' : 'Нажмите "Загрузить факты" для анализа точности'}</div>
+            )}
+          </div>
+        )}
+
+        {/* ====== TAB 3: ARCHIVE ====== */}
+        {tab === 3 && (
+          <div>
+            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <div className="flex gap-1">
+                  <button onClick={() => setArchMode('r')} className={'px-2 py-1 rounded text-xs font-medium ' + (archMode === 'r' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600')}>Последние</button>
+                  <button onClick={() => setArchMode('c')} className={'px-2 py-1 rounded text-xs font-medium ' + (archMode === 'c' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600')}>Произвольный</button>
+                </div>
+                {archMode === 'r' ? (
+                  <div className="flex items-center gap-1"><span className="text-xs text-gray-500">Дней:</span>
+                    {[7, 14, 30, 60, 90].map(d => <button key={d} onClick={() => setArchDays(d)} className={'px-2 py-0.5 rounded text-xs ' + (archDays === d ? 'bg-green-100 text-green-700 font-medium' : 'text-gray-500 hover:bg-gray-100')}>{d}</button>)}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1 flex-wrap">
+                    <span className="text-xs text-gray-500">С:</span><input type="date" value={archS} onChange={e => setArchS(e.target.value)} className="px-2 py-1 border rounded text-xs" />
+                    <span className="text-xs text-gray-500">По:</span><input type="date" value={archE} onChange={e => setArchE(e.target.value)} className="px-2 py-1 border rounded text-xs" />
+                  </div>
+                )}
+                <button onClick={loadArch} className="px-3 py-1 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">{archL ? '...' : 'Загрузить'}</button>
+              </div>
+              <div className="text-xs text-gray-400">ECMWF IFS анализ (~9 км) — ближе к реальным данным станций, чем ERA5. Для Белореченска максимально точные данные — станция в родниках (WMO 37013).</div>
+            </div>
+            {archL ? <div className="p-6 text-center"><div className="sp" /> Загрузка...</div> : archData.length > 0 ? (
+              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <table className="dt">
+                  <thead><tr><th>Дата</th><th>Т макс</th><th>Т мин</th><th>Осадки</th><th>Осадки</th><th>Ветер</th><th>Источник</th></tr></thead>
+                  <tbody>{[...archData].reverse().map(d => (
+                    <tr key={d.date}>
+                      <td className="font-medium">{formatDate(d.date)}</td>
+                      <td className={d.tempMax != null && d.tempMax > 35 ? 'text-red-600 font-medium' : ''}>{fmt(d.tempMax)}°C</td>
+                      <td>{fmt(d.tempMin)}°C</td>
+                      <td className={d.precipSum != null && d.precipSum > 0 ? 'text-blue-600 font-bold' : ''}>{fmt(d.precipSum)}мм</td>
+                      <td><div className="pb-bar"><div className={'pb-fill ' + getPrecipClass(d.precipSum)} style={{ width: pbw(d.precipSum) + '%' }} /></div></td>
+                      <td>{fmt(d.windMax, 0)}км/ч</td>
+                      <td><span className={'text-xs px-1.5 py-0.5 rounded-full ' + (d.source === 'ecmwf_ifs' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700')}>{d.source === 'ecmwf_ifs' ? 'ECMWF IFS' : 'ERA5'}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+                <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600 flex flex-wrap gap-3">
+                  <span>{formatDate(archData[0]?.date)} — {formatDate(archData[archData.length - 1]?.date)}</span>
+                  <span>{archData.length} дн.</span>
+                  {(() => { const pp = archData.map(d => d.precipSum).filter((v): v is number => v != null); if (!pp.length) return null; const t = pp.reduce((a, b) => a + b, 0);
+                    return <><span>Σ: {t.toFixed(1)}мм</span><span>Макс: {Math.max(...pp).toFixed(1)}мм</span><span>Ср/дн: {(t / pp.length).toFixed(1)}мм</span></>;
+                  })()}
+                </div>
+              </div>
+            ) : <div className="p-6 text-center text-gray-400">Нажмите «Загрузить»</div>}
+          </div>
+        )}
+
+        {/* ====== TAB 4: OBSERVATIONS ====== */}
+        {tab === 4 && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex gap-2">
+                <button onClick={() => setObsOpen(!obsOpen)} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">➕ Добавить</button>
+                {observations.length > 0 && <button onClick={() => dlCSV(expCSV(observations), 'obs_' + todayStr() + '.csv')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">📥 CSV</button>}
+              </div>
+              <span className="text-xs text-gray-400">{observations.length} зап.</span>
+            </div>
+            {obsOpen && (
+              <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+                  {[{ k: 'date', l: 'Дата', t: 'date' }, { k: 'temp', l: '🌡 Т(°C)', t: 'text' }, { k: 'humidity', l: '💧 Влажн.(%)', t: 'text' }, { k: 'precip', l: '🌧 Осадки(мм)', t: 'text' }, { k: 'wind', l: '💨 Ветер(м/с)', t: 'text' }, { k: 'notes', l: '📝 Прим.', t: 'text' }].map(f => (
+                    <div key={f.k}><label className="text-xs text-gray-500 block mb-0.5">{f.l}</label>
+                      <input type={f.t} value={(obsForm as any)[f.k]} onChange={e => setObsForm(p => ({ ...p, [f.k]: e.target.value }))} className="w-full px-2 py-1.5 border rounded text-xs" /></div>
+                  ))}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button onClick={addObsNow} className="px-3 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700">Сохранить</button>
+                  <button onClick={() => setObsOpen(false)} className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-xs font-medium">Отмена</button>
+                </div>
+              </div>
+            )}
+            {observations.length > 0 ? (
+              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <table className="dt">
+                  <thead><tr><th>Дата</th><th>🌡Т</th><th>💧Вл.</th><th>🌧Ос</th><th>💨В</th><th>Прим.</th><th></th></tr></thead>
+                  <tbody>{observations.map(o => (
+                    <tr key={o.id}><td className="font-medium">{formatDate(o.date)}</td><td>{o.temp || '—'}</td><td>{o.humidity || '—'}</td><td className={parseFloat(o.precip) > 0 ? 'text-blue-600 font-medium' : ''}>{o.precip || '—'}</td><td>{o.wind || '—'}</td><td className="text-xs text-gray-500 max-w-xs truncate">{o.notes || '—'}</td><td><button onClick={() => { delObs(o.id); setObservations(loadObs()); }} className="text-red-400 hover:text-red-600">🗑</button></td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <div className="p-6 text-center text-gray-400">Нет наблюдений</div>}
+          </div>
+        )}
+
+        <footer className="mt-6 py-3 text-center text-xs text-gray-400 border-t">
+          <p>АгроПогода — Data-First архитектура: ECMWF IFS, GFS, ICON-EU (Open-Meteo)</p>
+          <p>Прогнозы сохраняются ежедневно, данные неизменяемы · {loc.lat.toFixed(4)}°N, {loc.lon.toFixed(4)}°E</p>
+        </footer>
+      </main>
+    </div>
+  );
 }
