@@ -1,15 +1,14 @@
 import { ForecastRow, AgroRow, FactRow, GeoLocation, UserObservation } from './types';
 
 const K = {
-  FORECASTS: 'ap_forecasts',
-  AGRO: 'ap_agro',
-  FACTS: 'ap_facts',
   LOCATION: 'ap_location',
   PARAMS: 'ap_params',
   AGRO_PARAMS: 'ap_agro_params',
   OBS: 'ap_obs',
   RECENT_CITIES: 'ap_recent_cities',
   CITY_SLUG: 'ap_city_slug',
+  CACHE_ROWS: 'ap_cache_rows',
+  CACHE_AGRO: 'ap_cache_agro',
 };
 
 function gs<T>(key: string): T | null {
@@ -23,46 +22,13 @@ export function locId(loc: { lat: number; lon: number }): string {
   return `${loc.lat.toFixed(2)}_${loc.lon.toFixed(2)}`;
 }
 
-/* ====== ForecastRow ====== */
-export function loadForecastRows(): ForecastRow[] { return gs<ForecastRow[]>(K.FORECASTS) || []; }
-export function addForecastRows(newRows: ForecastRow[]): void {
-  const existing = loadForecastRows();
-  const existingIds = new Set(existing.map(r => r.id));
-  let combined = [...existing, ...newRows.filter(r => !existingIds.has(r.id))];
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 120);
-  const cutoffStr = cutoff.toISOString().split('T')[0];
-  combined = combined.filter(r => r.snapshotDate >= cutoffStr);
-  ss(K.FORECASTS, combined);
-}
-export function hasTodaySnapshot(lid: string): boolean {
-  const rows = loadForecastRows();
-  const today = todayStr();
-  return rows.some(r => r.locationId === lid && r.snapshotDate === today);
-}
+/* ====== ForecastRow (из JSON-файлов, не localStorage) ====== */
+export function loadForecastRows(): ForecastRow[] { return gs<ForecastRow[]>(K.CACHE_ROWS) || []; }
+export function saveForecastRows(rows: ForecastRow[]): void { ss(K.CACHE_ROWS, rows); }
 
 /* ====== AgroRow ====== */
-export function loadAgroRows(): AgroRow[] { return gs<AgroRow[]>(K.AGRO) || []; }
-export function addAgroRows(newRows: AgroRow[]): void {
-  const existing = loadAgroRows();
-  const existingIds = new Set(existing.map(r => r.id));
-  let combined = [...existing, ...newRows.filter(r => !existingIds.has(r.id))];
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 120);
-  const cutoffStr = cutoff.toISOString().split('T')[0];
-  combined = combined.filter(r => r.snapshotDate >= cutoffStr);
-  ss(K.AGRO, combined);
-}
-export function hasTodayAgroSnapshot(lid: string): boolean {
-  return loadAgroRows().some(r => r.locationId === lid && r.snapshotDate === todayStr());
-}
-
-/* ====== FactRow ====== */
-export function loadFactRows(): FactRow[] { return gs<FactRow[]>(K.FACTS) || []; }
-export function addFactRows(newRows: FactRow[]): void {
-  const existing = loadFactRows();
-  const existingIds = new Set(existing.map(r => r.id));
-  ss(K.FACTS, [...existing, ...newRows.filter(r => !existingIds.has(r.id))]);
-}
-export function clearFacts(): void { ss(K.FACTS, []); }
+export function loadAgroRows(): AgroRow[] { return gs<AgroRow[]>(K.CACHE_AGRO) || []; }
+export function saveAgroRows(rows: AgroRow[]): void { ss(K.CACHE_AGRO, rows); }
 
 /* ====== Location ====== */
 export const saveLocation = (v: GeoLocation) => ss(K.LOCATION, v);
@@ -120,6 +86,10 @@ export function formatDateFull(ds: string): string {
   const d = new Date(ds + 'T00:00:00');
   const m = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
   return d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
+}
+export function formatTime(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 export function fmt(v: number|null|undefined, dec: number = 1): string {
   return v != null ? v.toFixed(dec) : '—';

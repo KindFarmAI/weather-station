@@ -7,17 +7,17 @@ import {
   getWeatherDesc, getWeatherEmoji, WeatherParam,
 } from '@/lib/types';
 import {
-  searchLocations, fetchAllForecasts, fetchHourly, fetchFacts,
+  searchLocations, fetchAllForecasts, fetchHourly,
   fetchRecentArchive, fetchERA5Archive,
 } from '@/lib/api';
 import {
-  locId, todayStr, daysAgo, formatDate, formatDateFull, fmt, getPrecipClass, pbw,
-  loadForecastRows, addForecastRows, hasTodaySnapshot,
-  loadAgroRows, addAgroRows,
-  loadFactRows, addFactRows, clearFacts,
+  locId, todayStr, daysAgo, formatDate, formatDateFull, formatTime, fmt, getPrecipClass, pbw,
+  loadForecastRows, saveForecastRows,
+  loadAgroRows, saveAgroRows,
+
   saveLocation, loadLocation, saveParams, loadParams,
   saveAgroParams, loadAgroParams,
-  loadRecentCities, addRecentCity, loadCitySlug,
+  loadRecentCities, addRecentCity,
   loadObs, addObs, delObs, gid, expCSV, dlCSV,
 } from '@/lib/storage';
 
@@ -31,8 +31,6 @@ const SOURCES = [
   { id: 'ecmwf', name: 'ECMWF IFS', color: 'text-green-700', bg: 'bg-green-600' },
   { id: 'gfs',   name: 'GFS',       color: 'text-blue-700',  bg: 'bg-blue-600' },
   { id: 'icon',  name: 'ICON-EU',   color: 'text-purple-700', bg: 'bg-purple-600' },
-  { id: 'yandex', name: 'Яндекс',   color: 'text-yellow-700', bg: 'bg-yellow-500' },
-  { id: 'yrno',   name: 'yr.no',     color: 'text-teal-700',   bg: 'bg-teal-600' },
 ];
 
 function fmtVal(row: ForecastRow, pid: string): string {
@@ -63,14 +61,14 @@ export default function Home() {
   const [sr, setSr] = useState<GeoLocation[]>([]);
   const sTimer = useRef<NodeJS.Timeout | null>(null);
 
-  /* ====== Data (from storage) ====== */
+  /* ====== Data (from server JSON) ====== */
   const [rows, setRows] = useState<ForecastRow[]>([]);
   const [agroRows, setAgroRows] = useState<any[]>([]);
-  const [facts, setFacts] = useState<FactRow[]>([]);
   const [observations, setObservations] = useState<UserObservation[]>([]);
   const [fetchStatus, setFetchStatus] = useState<'idle' | 'fetching' | 'done' | 'error'>('idle');
   const [fetchMsg, setFetchMsg] = useState('');
-  const [lastSnap, setLastSnap] = useState('');
+  const [fetchedAt, setFetchedAt] = useState('');
+  const [snapshotDate, setSnapshotDate] = useState('');
 
   /* ====== UI ====== */
   const [tab, setTab] = useState(0);
@@ -96,65 +94,54 @@ export default function Home() {
   const [obsOpen, setObsOpen] = useState(false);
   const [obsForm, setObsForm] = useState({ temp: '', humidity: '', precip: '', wind: '', notes: '', date: todayStr() });
 
-  /* ====== Data lifecycle ====== */
-  const refreshData = useCallback(() => {
-    setRows(loadForecastRows());
-    setAgroRows(loadAgroRows());
-    setFacts(loadFactRows());
-    setObservations(loadObs());
+  /* ====== Data lifecycle: load from server JSON ====== */
+  const BASE = '/weather-station';
+
+  const loadFromServer = useCallback(async () => {
+    setFetchStatus('fetching');
+    setFetchMsg('Загрузка данных...');
+    try {
+      const r = await fetch(`${BASE}/data/latest.json`);
+      if (!r.ok) throw new Error('Файл данных не найден');
+      const snap = await r.json();
+      if (snap.forecastRows?.length) { setRows(snap.forecastRows); saveForecastRows(snap.forecastRows); }
+      if (snap.agroRows?.length) { setAgroRows(snap.agroRows); saveAgroRows(snap.agroRows); }
+      setFetchedAt(snap.fetchedAt || '');
+      setSnapshotDate(snap.snapshotDate || '');
+      setFetchStatus('done');
+      const time = snap.fetchedAt ? formatTime(snap.fetchedAt) : '';
+      setFetchMsg(`Обновлено ${snap.snapshotDate}${time ? ' в ' + time : ''} · ${snap.sourceCount || '?'} источн. · ${snap.dayCount || '?'} дн.`);
+    } catch (e: any) {
+      const cached = loadForecastRows();
+      if (cached.length > 0) {
+        setRows(cached); setAgroRows(loadAgroRows());
+        setFetchStatus('done'); setFetchMsg('Оффлайн: показаны кэшированные данные.');
+      } else {
+        setFetchStatus('error'); setFetchMsg('Нет данных. Первый запуск — данные появятся после автоматического обновления (06:00 / 18:00 MSK).');
+      }
+    }
   }, []);
 
-  const doFetch = useCallback(async (location: GeoLocation, force = false) => {
-    const lid = locId(location);
-    if (!force && hasTodaySnapshot(lid)) {
-      setFetchStatus('done');
-      setFetchMsg('Данные уже загружены сегодня');
-      return;
-    }
-    setFetchStatus('fetching');
-    setFetchMsg('Загрузка прогнозов...');
+  const doManualFetch = useCallback(async () => {
+    setFetchStatus('fetching'); setFetchMsg('Загрузка свежего прогноза...');
     try {
-      const { forecastRows, agroRows: newAgro } = await fetchAllForecasts(location);
+      const { forecastRows, agroRows: newAgro } = await fetchAllForecasts(loc);
       if (forecastRows.length === 0) throw new Error('Нет данных от серверов');
-      addForecastRows(forecastRows);
-      if (newAgro.length > 0) addAgroRows(newAgro);
-      addRecentCity(location);
-      refreshData();
-      setFetchStatus('done');
-      setFetchMsg(`Сохранено ${forecastRows.length} записей (${todayStr()})`);
-      setLastSnap(todayStr());
-    } catch (e: any) {
-      setFetchStatus('error');
-      setFetchMsg(e.message || 'Ошибка загрузки');
-    }
-  }, [refreshData]);
+      setRows(forecastRows); saveForecastRows(forecastRows);
+      if (newAgro.length > 0) { setAgroRows(newAgro); saveAgroRows(newAgro); }
+      addRecentCity(loc); setSnapshotDate(todayStr()); setFetchedAt(new Date().toISOString());
+      setFetchStatus('done'); setFetchMsg(`Ручное обновление: ${forecastRows.length} записей · ${todayStr()}`);
+    } catch (e: any) { setFetchStatus('error'); setFetchMsg(e.message || 'Ошибка загрузки'); }
+  }, [loc]);
 
   /* Init */
   useEffect(() => {
     const sl = loadLocation(); if (sl) setLoc(sl);
     const sp = loadParams(); if (sp) setParams(sp);
     const sap2 = loadAgroParams(); if (sap2) setAgroParams(sap2);
-    refreshData();
-  }, [refreshData]);
-
-  /* Auto-fetch on location change */
-  useEffect(() => {
-    if (!loc) return;
-    const lid = locId(loc);
-    const stored = loadForecastRows();
-    const mySnaps = stored.filter(r => r.locationId === lid).map(r => r.snapshotDate);
-    if (mySnaps.length > 0) {
-      const latest = mySnaps.sort().pop()!;
-      setLastSnap(latest);
-      if (latest === todayStr()) { setFetchStatus('done'); setFetchMsg(`Данные от сегодня (${latest})`); }
-      else { setFetchStatus('idle'); setFetchMsg(`Последние данные: ${latest}`); }
-    } else {
-      setLastSnap('');
-      setFetchStatus('idle');
-      setFetchMsg('Нет сохранённых данных для этой локации');
-    }
-    doFetch(loc);
-  }, [loc]);
+    setObservations(loadObs());
+    loadFromServer();
+  }, [loadFromServer]);
 
   /* ====== Computed: latest forecast per date per source ====== */
   const locRows = useMemo(() => {
@@ -191,16 +178,12 @@ export default function Home() {
   }, [locAgro]);
   const agroSortedDates = useMemo(() => Object.keys(agroByDate).sort(), [agroByDate]);
 
-  /* ====== Accuracy rows ====== */
+  /* ====== Accuracy ====== */
+  const [archFacts, setArchFacts] = useState<any[]>([]);
   const accuracyRows = useMemo(() => {
-    const lid = locId(loc);
-    const myFacts = facts.filter(f => f.locationId === lid);
-    if (!myFacts.length || !locRows.length) return [];
-    const out: {
-      date: string; fact: FactRow;
-      predictions: { sourceId: string; sourceName: string; daysBefore: number; tempMax: number|null; precipSum: number|null }[];
-    }[] = [];
-    for (const fact of myFacts) {
+    if (!archFacts.length || !locRows.length) return [];
+    const out: { date: string; fact: any; predictions: { sourceId: string; sourceName: string; daysBefore: number; tempMax: number|null; precipSum: number|null }[] }[] = [];
+    for (const fact of archFacts) {
       if (fact.date > todayStr()) continue;
       const preds = locRows.filter(r => r.targetDate === fact.date)
         .map(r => ({ sourceId: r.sourceId, sourceName: r.sourceName, daysBefore: r.daysBefore, tempMax: r.tempMax, precipSum: r.precipSum }))
@@ -208,7 +191,7 @@ export default function Home() {
       if (preds.length) out.push({ date: fact.date, fact, predictions: preds });
     }
     return out;
-  }, [locRows, facts, loc]);
+  }, [locRows, archFacts]);
 
   /* ====== Handlers ====== */
   const hSearch = (q: string) => {
@@ -245,11 +228,11 @@ export default function Home() {
     setArchData(d); setArchL(false);
   };
 
-  /* Facts */
+  /* Load facts for accuracy */
   const loadFactsNow = async () => {
     setFetchMsg('Загрузка фактических данных...');
-    const f = await fetchFacts(loc);
-    if (f.length) { addFactRows(f); refreshData(); setFetchMsg(`Загружено ${f.length} фактов`); }
+    const d = await fetchRecentArchive(loc.lat, loc.lon, 30);
+    if (d.length) { setArchFacts(d); setFetchMsg(`Загружено ${d.length} дней фактов`); }
     else { setFetchMsg('Не удалось загрузить факты'); }
   };
 
@@ -270,6 +253,9 @@ export default function Home() {
   const TABS = ['Прогноз', 'Сравнение', 'Сад/Огород', 'Точность', 'Архив', 'Источники', 'Наблюдения'];
   const TIC = ['🌡', '📊', '🌱', '🎯', '📅', '📡', '📝'];
 
+  const locRowCount = useMemo(() => rows.filter(r => r.locationId === locId(loc)).length, [rows, loc]);
+  const locAgroCount = useMemo(() => agroRows.filter((r: any) => r.locationId === locId(loc)).length, [agroRows, loc]);
+
   /* ====== RENDER ====== */
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50">
@@ -289,13 +275,13 @@ export default function Home() {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs text-gray-400">Данные:</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                {rows.filter(r => r.locationId === locId(loc)).length} зап.
-                {agroRows.length > 0 && <span className="ml-1 text-emerald-600">🌱 {agroRows.length} агро</span>}
-                {lastSnap && <span className="text-green-600 ml-1">→ {lastSnap}</span>}
+                {locRowCount} зап.
+                {locAgroCount > 0 && <span className="ml-1 text-emerald-600">🌱 {locAgroCount}</span>}
+                {snapshotDate && <span className="text-green-600 ml-1">→ {snapshotDate}</span>}
               </span>
-              <button onClick={() => doFetch(loc, true)} disabled={fetchStatus === 'fetching'}
-                className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50">
-                {fetchStatus === 'fetching' ? '⏳ Загрузка...' : '📥 Загрузить'}
+              <button onClick={doManualFetch} disabled={fetchStatus === 'fetching'}
+                className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50" title="Загрузить свежий прогноз напрямую">
+                {fetchStatus === 'fetching' ? '⏳ ...' : '🔄 Обновить'}
               </button>
             </div>
           </div>
@@ -574,8 +560,8 @@ export default function Home() {
             <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
               <div className="flex flex-wrap items-center gap-2 mb-2">
                 <button onClick={loadFactsNow} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">📊 Загрузить факты (60 дн.)</button>
-                {facts.length > 0 && <button onClick={() => { if (confirm('Удалить фактические данные?')) { clearFacts(); refreshData(); } }} className="px-2 py-1 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200">🗑 Очистить</button>}
-                <span className="text-xs text-gray-400">Фактов: {facts.filter(f => f.locationId === locId(loc)).length} | Прогнозов: {locRows.length}</span>
+                {archFacts.length > 0 && <button onClick={() => setArchFacts([])} className="px-2 py-1 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200">🗑 Очистить</button>}
+                <span className="text-xs text-gray-400">Фактов: {archFacts.length} | Прогнозов: {locRows.length}</span>
               </div>
               <div className="text-xs text-gray-500 leading-relaxed">
                 <strong>Как это работает:</strong> Каждый день при открытии приложения прогнозы автоматически сохраняются. Для каждой даты накапливается до 10 прогнозов (с 10-дневного до 0-дневного срока). Загрузив фактические данные, вы увидите как менялась точность прогноза по мере приближения к дате.

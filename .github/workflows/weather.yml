@@ -1,0 +1,43 @@
+name: Обновление прогноза погоды
+
+on:
+  schedule:
+    # 06:00 и 18:00 по Москве (MSK = UTC+3)
+    - cron: '0 3 * * *'   # 06:00 MSK
+    - cron: '0 15 * * *'  # 18:00 MSK
+  workflow_dispatch:       # Ручной запуск через кнопку в GitHub
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-weather:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Загрузка прогнозов
+        run: node scripts/fetch-weather.mjs --lat 44.7844 --lon 40.1169 --city "Белореченск"
+
+      - name: Копирование данных в out/ (если есть)
+        run: |
+          if [ -d "out" ]; then
+            mkdir -p out/data
+            cp -r data/* out/data/
+            echo "data/ скопирован в out/data/"
+          fi
+
+      - name: Коммит и пуш данных
+        run: |
+          git config user.name "AgroPogoda Bot"
+          git config user.email "bot@agropogoda.local"
+          git add data/
+          if [ -d "out" ]; then git add out/data/; fi
+          git diff --cached --quiet || (git commit -m "📊 Прогноз погоды $(date -u +%Y-%m-%d\ %H:%M\ UTC)" && git push)
+          echo "Данные обновлены"
