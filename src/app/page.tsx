@@ -1,784 +1,678 @@
 'use client';
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  GeoLocation, ForecastRow, FactRow, HourlyForecast, ArchiveDay, UserObservation, AgroRow,
-  WEATHER_PARAMS, DEFAULT_PARAMS, AGRO_PARAMS, POPULAR_CITIES,
-  FORECAST_SOURCES, FACT_SOURCES,
-  getWeatherDesc, getWeatherEmoji, WeatherParam,
-} from '@/lib/types';
-import {
-  searchLocations, fetchAllForecasts, fetchHourly,
-  fetchRecentArchive, fetchERA5Archive,
-} from '@/lib/api';
-import {
-  locId, todayStr, daysAgo, formatDate, formatDateFull, formatTime, fmt, getPrecipClass, pbw,
-  loadForecastRows, saveForecastRows,
-  loadAgroRows, saveAgroRows,
+  Cloud, Sun, CloudRain, CloudSnow, CloudLightning, CloudDrizzle, CloudFog,
+  Thermometer, Droplets, Wind, Gauge, Eye, Calendar,
+  RefreshCw, MapPin, Clock, ChevronRight, ChevronDown, Sprout,
+  TrendingUp, AlertTriangle, Leaf, TreePine,
+} from 'lucide-react';
 
-  saveLocation, loadLocation, saveParams, loadParams,
-  saveAgroParams, loadAgroParams,
-  loadRecentCities, addRecentCity,
-  loadObs, addObs, delObs, gid, expCSV, dlCSV,
-} from '@/lib/storage';
+/* ====== Types ====== */
+interface ForecastRow {
+  id: string; targetDate: string; sourceId: string; sourceName: string;
+  snapshotDate: string; daysBefore: number; locationId: string;
+  tempMax: number|null; tempMin: number|null; precipSum: number|null; precipProb: number|null;
+  windMax: number|null; windGusts: number|null; humidityMax: number|null; humidityMin: number|null;
+  pressureMax: number|null; pressureMin: number|null; uvIndexMax: number|null;
+  weatherCode: number|null; et0: number|null;
+}
 
-const DL: GeoLocation = {
-  name: 'Белореченск', lat: 44.7844, lon: 40.1169,
-  country: 'Россия', admin1: 'Краснодарский край',
-  displayName: 'Белореченск, Краснодарский край, Россия',
-};
+interface AgroRow {
+  id: string; targetDate: string; sourceId: string; sourceName: string;
+  snapshotDate: string; daysBefore: number; locationId: string;
+  soilTemp6cm: number|null; soilTemp18cm: number|null; soilTemp54cm: number|null;
+  soilMoisture07: number|null; soilMoisture28100: number|null;
+  et0Sum: number|null; dewPointMax: number|null; vaporPressureDefMax: number|null;
+  solarRadiationSum: number|null; growingDegreeDays: number|null; frostRisk: boolean|null;
+}
+
+interface Snapshot {
+  id: string; location: { name: string; lat: number; lon: number; locationId: string };
+  snapshotDate: string; fetchedAt: string;
+  forecastRows: ForecastRow[]; agroRows: AgroRow[];
+  sourceCount: number; dayCount: number; errors: string[];
+}
+
+/* ====== Constants ====== */
+const BASE = '/weather-station';
 
 const SOURCES = [
-  { id: 'ecmwf', name: 'ECMWF IFS', color: 'text-green-700', bg: 'bg-green-600' },
-  { id: 'gfs',   name: 'GFS',       color: 'text-blue-700',  bg: 'bg-blue-600' },
-  { id: 'icon',  name: 'ICON-EU',   color: 'text-purple-700', bg: 'bg-purple-600' },
+  { id: 'ecmwf', name: 'ECMWF IFS', color: '#16a34a', bg: '#dcfce7', border: '#bbf7d0' },
+  { id: 'gfs',   name: 'GFS',       color: '#2563eb', bg: '#dbeafe', border: '#bfdbfe' },
+  { id: 'icon',  name: 'ICON-EU',   color: '#9333ea', bg: '#f3e8ff', border: '#e9d5ff' },
 ];
 
-function fmtVal(row: ForecastRow, pid: string): string {
-  const p = WEATHER_PARAMS.find(x => x.id === pid);
-  if (!p) return '—';
-  const v = row[p.rowKey] as number | null;
-  if (v == null) return '—';
-  if (pid === 'uvIndexMax') return v.toFixed(1) + (v >= 8 ? ' (опасно)' : v >= 6 ? ' (выс.)' : v >= 3 ? ' (умер.)' : ' (низ.)');
-  if (pid === 'et0') return v.toFixed(1);
-  return fmt(v) + ' ' + p.unit;
+const WMO: Record<number, string> = {
+  0:'Ясно',1:'Преим.ясно',2:'Перем.облачн.',3:'Пасмурно',45:'Туман',48:'Изморозь',
+  51:'Морось сл.',53:'Морось',55:'Морось сил.',61:'Дождь сл.',63:'Дождь',65:'Дождь сил.',
+  71:'Снег сл.',73:'Снег',75:'Снег сил.',80:'Ливень сл.',81:'Ливень',82:'Ливень сил.',
+  85:'Снегопад сл.',86:'Снегопад сил.',95:'Гроза',96:'Гроза+град',99:'Гроза+град сил.',
+};
+function wmoDesc(c: number|null): string { return c == null ? '' : (WMO[c] || ''); }
+
+const WEEKDAYS = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+const MONTHS = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const MONTHS_SHORT = ['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'];
+
+function todayStr() { return new Date().toISOString().split('T')[0]; }
+function tomorrowStr() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
+
+function fmtDate(d: string): string {
+  const dt = new Date(d + 'T12:00:00');
+  const today = todayStr(), tomorrow = tomorrowStr();
+  if (d === today) return 'Сегодня';
+  if (d === tomorrow) return 'Завтра';
+  return `${dt.getDate()} ${MONTHS_SHORT[dt.getMonth()]}`;
+}
+function fmtWeekday(d: string): string { return WEEKDAYS[new Date(d + 'T12:00:00').getDay()]; }
+function fmtVal(v: number|null, dec = 1): string { return v != null ? v.toFixed(dec) : '—'; }
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')} UTC`;
 }
 
-function fmtAgro(row: any, pid: string): string {
-  const p = AGRO_PARAMS.find(x => x.id === pid);
-  if (!p) return '—';
-  const v = row[p.key];
-  if (v == null) return '—';
-  if (pid === 'frostRisk') return v ? '❄️ Да' : '✅ Нет';
-  if (pid === 'growingDegreeDays') return v.toFixed(1);
-  return v.toFixed(2) + ' ' + p.unit;
+function getWeatherIcon(c: number|null, size = 22) {
+  if (c == null || c === 1) return <Sun className="text-amber-400" size={size} />;
+  if (c === 0) return <Sun className="text-amber-500" size={size} />;
+  if (c === 2) return <Cloud className="text-slate-400" size={size} />;
+  if (c === 3) return <Cloud className="text-slate-500" size={size} />;
+  if (c <= 48) return <CloudFog className="text-slate-400" size={size} />;
+  if (c <= 55) return <CloudDrizzle className="text-blue-400" size={size} />;
+  if (c <= 67) return <CloudRain className="text-blue-500" size={size} />;
+  if (c <= 77) return <CloudSnow className="text-blue-300" size={size} />;
+  if (c <= 82) return <CloudRain className="text-blue-600" size={size} />;
+  return <CloudLightning className="text-amber-600" size={size} />;
 }
 
+function getTempColor(t: number|null): string {
+  if (t == null) return 'text-slate-400';
+  if (t <= -15) return 'text-blue-700';
+  if (t <= -5) return 'text-blue-500';
+  if (t <= 0) return 'text-cyan-500';
+  if (t <= 10) return 'text-teal-600';
+  if (t <= 18) return 'text-emerald-600';
+  if (t <= 25) return 'text-orange-500';
+  if (t <= 32) return 'text-red-500';
+  return 'text-red-700';
+}
+
+type Tab = 'forecast' | 'compare' | 'agro' | 'sources';
+
+/* ====== MAIN COMPONENT ====== */
 export default function Home() {
-  /* ====== Location ====== */
-  const [loc, setLoc] = useState<GeoLocation>(DL);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [sq, setSq] = useState('');
-  const [sr, setSr] = useState<GeoLocation[]>([]);
-  const sTimer = useRef<NodeJS.Timeout | null>(null);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [tab, setTab] = useState<Tab>('forecast');
+  const [activeSource, setActiveSource] = useState('ecmwf');
+  const [expandedDay, setExpandedDay] = useState<string | null>(null);
 
-  /* ====== Data (from server JSON) ====== */
-  const [rows, setRows] = useState<ForecastRow[]>([]);
-  const [agroRows, setAgroRows] = useState<any[]>([]);
-  const [observations, setObservations] = useState<UserObservation[]>([]);
-  const [fetchStatus, setFetchStatus] = useState<'idle' | 'fetching' | 'done' | 'error'>('idle');
-  const [fetchMsg, setFetchMsg] = useState('');
-  const [fetchedAt, setFetchedAt] = useState('');
-  const [snapshotDate, setSnapshotDate] = useState('');
-
-  /* ====== UI ====== */
-  const [tab, setTab] = useState(0);
-  const [params, setParams] = useState<string[]>(DEFAULT_PARAMS);
-  const [agroParams, setAgroParams] = useState<string[]>(['soilTemp6cm','soilTemp18cm','et0Sum','frostRisk','growingDegreeDays']);
-  const [showPS, setShowPS] = useState(false);
-  const [selDate, setSelDate] = useState<string | null>(null);
-  const [selSource, setSelSource] = useState('ecmwf');
-  const [expandDate, setExpandDate] = useState<string | null>(null);
-  const [hourlyData, setHourlyData] = useState<HourlyForecast[]>([]);
-  const [hourlyLoading, setHourlyLoading] = useState(false);
-  const [showHourly, setShowHourly] = useState(false);
-
-  /* Archive */
-  const [archData, setArchData] = useState<ArchiveDay[]>([]);
-  const [archL, setArchL] = useState(false);
-  const [archDays, setArchDays] = useState(14);
-  const [archMode, setArchMode] = useState<'r' | 'c'>('r');
-  const [archS, setArchS] = useState(daysAgo(30));
-  const [archE, setArchE] = useState(daysAgo(0));
-
-  /* Observations form */
-  const [obsOpen, setObsOpen] = useState(false);
-  const [obsForm, setObsForm] = useState({ temp: '', humidity: '', precip: '', wind: '', notes: '', date: todayStr() });
-
-  /* ====== Data lifecycle: load from server JSON ====== */
-  const BASE = '/weather-station';
-
-  const loadFromServer = useCallback(async () => {
-    setFetchStatus('fetching');
-    setFetchMsg('Загрузка данных...');
-    try {
-      const r = await fetch(`${BASE}/data/latest.json`);
-      if (!r.ok) throw new Error('Файл данных не найден');
-      const snap = await r.json();
-      if (snap.forecastRows?.length) { setRows(snap.forecastRows); saveForecastRows(snap.forecastRows); }
-      if (snap.agroRows?.length) { setAgroRows(snap.agroRows); saveAgroRows(snap.agroRows); }
-      setFetchedAt(snap.fetchedAt || '');
-      setSnapshotDate(snap.snapshotDate || '');
-      setFetchStatus('done');
-      const time = snap.fetchedAt ? formatTime(snap.fetchedAt) : '';
-      setFetchMsg(`Обновлено ${snap.snapshotDate}${time ? ' в ' + time : ''} · ${snap.sourceCount || '?'} источн. · ${snap.dayCount || '?'} дн.`);
-    } catch (e: any) {
-      const cached = loadForecastRows();
-      if (cached.length > 0) {
-        setRows(cached); setAgroRows(loadAgroRows());
-        setFetchStatus('done'); setFetchMsg('Оффлайн: показаны кэшированные данные.');
-      } else {
-        setFetchStatus('error'); setFetchMsg('Нет данных. Первый запуск — данные появятся после автоматического обновления (06:00 / 18:00 MSK).');
-      }
-    }
+  useEffect(() => {
+    fetch(`${BASE}/data/latest.json`)
+      .then(r => { if (!r.ok) throw new Error('Data not found'); return r.json(); })
+      .then(data => { setSnapshot(data); setLoading(false); })
+      .catch(() => { setError('Не удалось загрузить данные'); setLoading(false); });
   }, []);
 
-  const doManualFetch = useCallback(async () => {
-    setFetchStatus('fetching'); setFetchMsg('Загрузка свежего прогноза...');
-    try {
-      const { forecastRows, agroRows: newAgro } = await fetchAllForecasts(loc);
-      if (forecastRows.length === 0) throw new Error('Нет данных от серверов');
-      setRows(forecastRows); saveForecastRows(forecastRows);
-      if (newAgro.length > 0) { setAgroRows(newAgro); saveAgroRows(newAgro); }
-      addRecentCity(loc); setSnapshotDate(todayStr()); setFetchedAt(new Date().toISOString());
-      setFetchStatus('done'); setFetchMsg(`Ручное обновление: ${forecastRows.length} записей · ${todayStr()}`);
-    } catch (e: any) { setFetchStatus('error'); setFetchMsg(e.message || 'Ошибка загрузки'); }
-  }, [loc]);
+  const dates = useMemo(() => {
+    if (!snapshot) return [];
+    const s = new Set(snapshot.forecastRows.map(r => r.targetDate));
+    return Array.from(s).sort();
+  }, [snapshot]);
 
-  /* Init */
-  useEffect(() => {
-    const sl = loadLocation(); if (sl) setLoc(sl);
-    const sp = loadParams(); if (sp) setParams(sp);
-    const sap2 = loadAgroParams(); if (sap2) setAgroParams(sap2);
-    setObservations(loadObs());
-    loadFromServer();
-  }, [loadFromServer]);
-
-  /* ====== Computed: latest forecast per date per source ====== */
-  const locRows = useMemo(() => {
-    const lid = locId(loc);
-    return rows.filter(r => r.locationId === lid);
-  }, [rows, loc]);
-
-  const latestByDate = useMemo(() => {
+  const rowsByDateSource = useMemo(() => {
     const m: Record<string, Record<string, ForecastRow>> = {};
-    for (const row of locRows) {
-      if (!m[row.targetDate]) m[row.targetDate] = {};
-      const existing = m[row.targetDate][row.sourceId];
-      if (!existing || row.daysBefore <= existing.daysBefore) {
-        m[row.targetDate][row.sourceId] = row;
-      }
+    if (!snapshot) return m;
+    for (const r of snapshot.forecastRows) {
+      if (!m[r.targetDate]) m[r.targetDate] = {};
+      m[r.targetDate][r.sourceId] = r;
     }
     return m;
-  }, [locRows]);
+  }, [snapshot]);
 
-  const sortedDates = useMemo(() => Object.keys(latestByDate).sort(), [latestByDate]);
-
-  const locAgro = useMemo(() => agroRows.filter((r: any) => r.locationId === locId(loc)), [agroRows, loc]);
   const agroByDate = useMemo(() => {
-    const m: Record<string, any[]> = {};
-    for (const r of locAgro) {
-      if (!m[r.targetDate]) m[r.targetDate] = [];
-      const existing = m[r.targetDate].find((x: any) => x.sourceId === r.sourceId);
-      if (!existing || r.daysBefore <= existing.daysBefore) {
-        m[r.targetDate] = m[r.targetDate].filter((x: any) => x.sourceId !== r.sourceId);
-        m[r.targetDate].push(r);
-      }
+    const m: Record<string, Record<string, AgroRow>> = {};
+    if (!snapshot) return m;
+    for (const r of snapshot.agroRows) {
+      if (!m[r.targetDate]) m[r.targetDate] = {};
+      m[r.targetDate][r.sourceId] = r;
     }
     return m;
-  }, [locAgro]);
-  const agroSortedDates = useMemo(() => Object.keys(agroByDate).sort(), [agroByDate]);
+  }, [snapshot]);
 
-  /* ====== Accuracy ====== */
-  const [archFacts, setArchFacts] = useState<any[]>([]);
-  const accuracyRows = useMemo(() => {
-    if (!archFacts.length || !locRows.length) return [];
-    const out: { date: string; fact: any; predictions: { sourceId: string; sourceName: string; daysBefore: number; tempMax: number|null; precipSum: number|null }[] }[] = [];
-    for (const fact of archFacts) {
-      if (fact.date > todayStr()) continue;
-      const preds = locRows.filter(r => r.targetDate === fact.date)
-        .map(r => ({ sourceId: r.sourceId, sourceName: r.sourceName, daysBefore: r.daysBefore, tempMax: r.tempMax, precipSum: r.precipSum }))
-        .sort((a, b) => a.daysBefore - b.daysBefore);
-      if (preds.length) out.push({ date: fact.date, fact, predictions: preds });
-    }
-    return out;
-  }, [locRows, archFacts]);
-
-  /* ====== Handlers ====== */
-  const hSearch = (q: string) => {
-    setSq(q);
-    if (sTimer.current) clearTimeout(sTimer.current);
-    if (q.length < 2) { setSr([]); return; }
-    sTimer.current = setTimeout(async () => { try { setSr(await searchLocations(q)); } catch { setSr([]); } }, 350);
-  };
-  const selectCity = (c: GeoLocation) => {
-    setLoc(c); saveLocation(c); setSearchOpen(false); setSq(''); setSr([]);
-    setExpandDate(null); setShowHourly(false);
-  };
-  const togParam = (pid: string) => setParams(p => { const n = p.includes(pid) ? p.filter(x => x !== pid) : [...p, pid]; saveParams(n); return n; });
-  const togAgroParam = (pid: string) => setAgroParams(p => { const n = p.includes(pid) ? p.filter(x => x !== pid) : [...p, pid]; saveAgroParams(n); return n; });
-  const clickDate = async (date: string) => {
-    setSelDate(date === selDate ? null : date);
-    if (date !== selDate) { setShowHourly(true); setHourlyLoading(true); setHourlyData([]); }
-  };
-  useEffect(() => {
-    if (!showHourly || !selDate) return;
-    setHourlyLoading(true);
-    fetchHourly(loc.lat, loc.lon, selDate).then(d => { setHourlyData(d); setHourlyLoading(false); });
-  }, [selDate, showHourly]);
-
-  /* Archive */
-  const loadArch = async () => {
-    setArchL(true); setArchData([]);
-    let d: ArchiveDay[] = [];
-    if (archMode === 'r') { d = await fetchRecentArchive(loc.lat, loc.lon, archDays); }
-    else {
-      const diff = Math.floor((Date.now() - new Date(archS + 'T00:00:00').getTime()) / 864e5);
-      d = diff <= 92 ? await fetchRecentArchive(loc.lat, loc.lon, diff) : await fetchERA5Archive(loc.lat, loc.lon, archS, archE);
-    }
-    setArchData(d); setArchL(false);
-  };
-
-  /* Load facts for accuracy */
-  const loadFactsNow = async () => {
-    setFetchMsg('Загрузка фактических данных...');
-    const d = await fetchRecentArchive(loc.lat, loc.lon, 30);
-    if (d.length) { setArchFacts(d); setFetchMsg(`Загружено ${d.length} дней фактов`); }
-    else { setFetchMsg('Не удалось загрузить факты'); }
-  };
-
-  /* Observations */
-  const addObsNow = () => {
-    if (!obsForm.date) return;
-    addObs({ id: gid(), date: obsForm.date, temp: obsForm.temp, humidity: obsForm.humidity, precip: obsForm.precip, wind: obsForm.wind, notes: obsForm.notes, createdAt: new Date().toISOString() });
-    setObservations(loadObs());
-    setObsForm({ temp: '', humidity: '', precip: '', wind: '', notes: '', date: todayStr() });
-    setObsOpen(false);
-  };
-
-  /* ====== City search panel ====== */
-  const recentCities = useMemo(() => loadRecentCities(), [searchOpen]);
-  const showSuggestions = searchOpen && (sq.length < 2 ? (recentCities.length > 0 || POPULAR_CITIES.length > 0) : sr.length > 0);
-
-  /* ====== Tabs ====== */
-  const TABS = ['Прогноз', 'Сравнение', 'Сад/Огород', 'Точность', 'Архив', 'Источники', 'Наблюдения'];
-  const TIC = ['🌡', '📊', '🌱', '🎯', '📅', '📡', '📝'];
-
-  const locRowCount = useMemo(() => rows.filter(r => r.locationId === locId(loc)).length, [rows, loc]);
-  const locAgroCount = useMemo(() => agroRows.filter((r: any) => r.locationId === locId(loc)).length, [agroRows, loc]);
+  const today = rowsByDateSource[todayStr()]?.[activeSource] || rowsByDateSource[todayStr()]?.['ecmwf'];
 
   /* ====== RENDER ====== */
+  if (loading) return <LoadingScreen />;
+  if (!snapshot || error) return <ErrorScreen msg={error} />;
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50">
-      {/* === HEADER === */}
-      <header className="bg-white shadow-sm border-b border-green-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-3 py-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-xl">🌾</span>
-              <div className="min-w-0">
-                <h1 className="text-base font-bold text-green-800 leading-tight">АгроПогода</h1>
-                <button onClick={() => setSearchOpen(!searchOpen)} className="text-xs text-green-600 hover:text-green-800 truncate block">
-                  📍 {loc.name}{loc.admin1 ? <span className="text-gray-400">, {loc.admin1}</span> : null} <span className="text-gray-300">✏️</span>
-                </button>
-              </div>
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100/80">
+      {/* Header */}
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-green-400 to-emerald-600 flex items-center justify-center shadow-md shadow-green-200/50">
+              <Sprout className="text-white" size={18} />
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-gray-400">Данные:</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                {locRowCount} зап.
-                {locAgroCount > 0 && <span className="ml-1 text-emerald-600">🌱 {locAgroCount}</span>}
-                {snapshotDate && <span className="text-green-600 ml-1">→ {snapshotDate}</span>}
-              </span>
-              <button onClick={doManualFetch} disabled={fetchStatus === 'fetching'}
-                className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50" title="Загрузить свежий прогноз напрямую">
-                {fetchStatus === 'fetching' ? '⏳ ...' : '🔄 Обновить'}
+            <div>
+              <h1 className="text-base font-bold text-slate-800 leading-tight">АгроПогода</h1>
+              <p className="text-[11px] text-slate-400">Белореченск, Краснодарский край</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 bg-slate-50 px-2.5 py-1 rounded-full">
+              <Clock size={12} />
+              {snapshot?.fetchedAt ? fmtTime(snapshot.fetchedAt) : '—'}
+            </div>
+            <div className="flex items-center gap-1 text-xs text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {snapshot?.sourceCount || 0} модел.
+            </div>
+          </div>
+        </div>
+        {/* Tabs */}
+        <div className="max-w-5xl mx-auto px-4">
+          <nav className="flex gap-0.5 -mb-px overflow-x-auto">
+            {([
+              ['forecast', 'Прогноз', <Thermometer key="t1" size={14} />],
+              ['compare', 'Сравнение', <TrendingUp key="t2" size={14} />],
+              ['agro', 'Сад / Огород', <TreePine key="t3" size={14} />],
+              ['sources', 'Источники', <Eye key="t4" size={14} />],
+            ] as [Tab, string, React.ReactNode][]).map(([k, label, icon]) => (
+              <button key={k} onClick={() => setTab(k)}
+                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-all ${
+                  tab === k
+                    ? 'border-emerald-500 text-emerald-700'
+                    : 'border-transparent text-slate-400 hover:text-slate-600 hover:border-slate-200'
+                }`}>
+                {icon} {label}
               </button>
-            </div>
-          </div>
-
-          {/* Status message */}
-          {fetchMsg && <div className={'mt-1 text-xs px-2 py-1 rounded ' + (fetchStatus === 'error' ? 'bg-red-50 text-red-600' : fetchStatus === 'done' ? 'bg-green-50 text-green-700' : 'bg-blue-50 text-blue-600')}>
-            {fetchMsg}
-          </div>}
-
-          {/* City search */}
-          {searchOpen && (
-            <div className="mt-2 relative">
-              <input type="text" value={sq} onChange={e => hSearch(e.target.value)} placeholder="Начните вводить город..."
-                className="w-full px-3 py-2 border-2 border-green-300 rounded-lg focus:outline-none focus:border-green-500 text-sm" autoFocus />
-              {showSuggestions && (
-                <div className="absolute z-50 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-64 overflow-auto">
-                  {sq.length < 2 ? (
-                    <>
-                      {recentCities.length > 0 && (
-                        <div>
-                          <div className="px-3 py-1.5 text-xs text-gray-400 font-medium bg-gray-50 sticky top-0">Недавние</div>
-                          {recentCities.map((c, i) => (
-                            <button key={'r' + i} onClick={() => selectCity(c)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
-                              <div className="font-medium text-gray-800 text-sm">{c.name}</div>
-                              <div className="text-xs text-gray-500 truncate">{c.displayName}</div>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <div>
-                        <div className="px-3 py-1.5 text-xs text-gray-400 font-medium bg-gray-50 sticky top-0">Популярные города</div>
-                        {POPULAR_CITIES.slice(0, sq.length < 2 && recentCities.length > 0 ? 5 : 10).map((c, i) => (
-                          <button key={'p' + i} onClick={() => selectCity(c)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
-                            <div className="font-medium text-gray-800 text-sm">{c.name}</div>
-                            <div className="text-xs text-gray-500 truncate">{c.displayName}</div>
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    sr.map((r, i) => (
-                      <button key={i} onClick={() => selectCity(r)} className="w-full px-3 py-2 text-left hover:bg-green-50 border-b last:border-0">
-                        <div className="font-medium text-gray-800 text-sm">{r.name}</div>
-                        <div className="text-xs text-gray-500 truncate">{r.displayName}</div>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-              <button onClick={() => { setSearchOpen(false); setSq(''); setSr([]); }} className="absolute right-2 top-2 text-gray-400 hover:text-gray-600">✕</button>
-            </div>
-          )}
-
-          {/* Tabs */}
-          <div className="flex mt-2 border-t border-green-100 pt-1 -mx-3 px-3 overflow-x-auto">
-            {TABS.map((t, i) => (
-              <button key={i} onClick={() => { setTab(i); setSelDate(null); setShowHourly(false); setExpandDate(null); }}
-                className={'tb ' + (tab === i ? 'on' : '')}>{TIC[i]} {t}</button>
             ))}
-          </div>
+          </nav>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-3 py-3">
-        {/* === PARAM BAR === */}
-        <div className="mb-3 flex items-center gap-1 flex-wrap">
-          <button onClick={() => setShowPS(!showPS)} className="text-xs text-green-700 hover:text-green-900 font-medium">⚙️ Парам. ({params.length})</button>
-          {params.map(pid => {
-            const p = WEATHER_PARAMS.find(x => x.id === pid);
-            return p ? (
-              <span key={pid} className="pb on">{p.icon}{p.label}<span onClick={() => togParam(pid)} className="ml-0.5 cursor-pointer text-green-400 hover:text-red-500">✕</span></span>
-            ) : null;
-          })}
-        </div>
-        {showPS && (
-          <div className="mb-3 p-3 bg-white rounded-lg border shadow-sm">
-            <div className="text-xs text-gray-500 mb-2">Выберите параметры для отображения (изменяется только визуал, данные сохранены полностью):</div>
-            <div className="flex flex-wrap gap-1">
-              {WEATHER_PARAMS.map(p => (
-                <button key={p.id} onClick={() => togParam(p.id)} className={'pb ' + (params.includes(p.id) ? 'on' : '')}>
-                  {p.icon}{p.label}<span className="text-xs opacity-50">{p.unit}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+      <main className="max-w-5xl mx-auto px-4 py-5 space-y-4">
+        {tab === 'forecast' && (
+          <ForecastTab
+            today={today} dates={dates} rowsByDateSource={rowsByDateSource}
+            activeSource={activeSource} onSourceChange={setActiveSource}
+            expandedDay={expandedDay} onToggleDay={setExpandedDay}
+          />
         )}
+        {tab === 'compare' && <CompareTab dates={dates} rowsByDateSource={rowsByDateSource} />}
+        {tab === 'agro' && <AgroTab dates={dates} agroByDate={agroByDate} />}
+        {tab === 'sources' && <SourcesTab />}
 
-        {/* ====== TAB 0: FORECAST ====== */}
-        {tab === 0 && (
-          <div>
-            {/* Source selector */}
-            <div className="flex gap-1 mb-3 flex-wrap">
-              {SOURCES.map(s => (
-                <button key={s.id} onClick={() => { setSelSource(s.id); setExpandDate(null); }}
-                  className={'px-2 py-1.5 rounded-lg text-xs font-medium transition ' + (selSource === s.id ? s.bg + ' text-white shadow' : 'bg-white text-gray-600 hover:bg-gray-50 border')}>
-                  {s.name}
-                </button>
-              ))}
-              <button onClick={() => setExpandDate(expandDate ? null : (sortedDates[0] || null))}
-                className="px-2 py-1.5 rounded-lg text-xs font-medium transition bg-gray-100 text-gray-600 hover:bg-gray-200 border border-dashed">
-                {expandDate ? '🔀 Свернуть' : '📋 История прогнозов'}
-              </button>
-            </div>
-
-            {sortedDates.length === 0 ? (
-              <div className="p-6 text-center text-gray-400">
-                {fetchStatus === 'fetching' ? <div className="flex items-center justify-center gap-2"><div className="sp" />Загрузка...</div> : 'Нет данных. Нажмите "Загрузить" для получения прогноза.'}
-              </div>
-            ) : (
-              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <table className="dt">
-                  <thead>
-                    <tr>
-                      <th>Дата</th><th>Погода</th><th>Д-до</th>
-                      {params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.icon}{p.label}</th> : null; })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedDates.map(date => {
-                      const row = latestByDate[date]?.[selSource];
-                      if (!row) return null;
-                      const isExpanded = expandDate === date;
-                      return (
-                        <tbody key={date}>
-                          <tr onClick={() => setExpandDate(isExpanded ? null : date)} className={isExpanded ? 'cur' : 'cursor-pointer hover:bg-gray-50'}>
-                            <td className="font-medium">{formatDate(date)}{date === todayStr() && <span className="ml-1 text-xs bg-green-100 text-green-700 px-1 rounded">сег.</span>}</td>
-                            <td><span className="mr-0.5">{getWeatherEmoji(row.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(row.weatherCode)}</span></td>
-                            <td className="text-xs text-gray-400">{row.daysBefore >= 0 ? row.daysBefore + 'д' : '—'}</td>
-                            {params.map(pid => {
-                              if (pid === 'precipSum') {
-                                return (<td key={pid}><div className="flex items-center gap-1"><span className={row.precipSum && row.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(row.precipSum)}</span><div className="pb-bar"><div className={'pb-fill ' + getPrecipClass(row.precipSum)} style={{ width: pbw(row.precipSum) + '%' }} /></div></div></td>);
-                              }
-                              return <td key={pid}>{fmtVal(row, pid)}</td>;
-                            })}
-                          </tr>
-                          {/* Expanded: history of predictions for this date */}
-                          {isExpanded && (() => {
-                            const history = locRows.filter(r => r.targetDate === date).sort((a, b) => a.daysBefore - b.daysBefore);
-                            if (history.length <= 1) return <tr><td colSpan={3 + params.length} className="text-center text-xs text-gray-400 py-2">Только одно наблюдение за эту дату</td></tr>;
-                            return (
-                              <tr>
-                                <td colSpan={3 + params.length} className="p-0">
-                                  <div className="bg-blue-50/50 border-t border-blue-200">
-                                    <div className="px-3 py-1.5 text-xs text-blue-700 font-medium">История прогнозов на {formatDateFull(date)} ({SOURCES.find(s => s.id === selSource)?.name})</div>
-                                    <table className="dt">
-                                      <thead><tr><th>Когда сохранено</th><th>Дней до даты</th>{params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.label}</th> : null; })}</tr></thead>
-                                      <tbody>
-                                        {history.filter(r => r.sourceId === selSource).map(r => (
-                                          <tr key={r.id} className={r.snapshotDate === todayStr() ? 'bg-green-50' : ''}>
-                                            <td className="text-xs">{formatDate(r.snapshotDate)}{r.snapshotDate === todayStr() && <span className="ml-1 text-green-600">→ сегодня</span>}</td>
-                                            <td className="text-xs text-center">{r.daysBefore >= 0 ? r.daysBefore + 'д' : (Math.abs(r.daysBefore) + 'д после')}</td>
-                                            {params.map(pid => {
-                                              if (pid === 'precipSum') return <td key={pid}><span className={r.precipSum && r.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(r.precipSum)}</span></td>;
-                                              return <td key={pid}>{fmtVal(r, pid)}</td>;
-                                            })}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })()}
-                        </tbody>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-500">
-                  Показаны последние прогнозы · {sortedDates.length} дней · {SOURCES.find(s => s.id === selSource)?.name}
-                </div>
-              </div>
-            )}
-
-            {/* Hourly */}
-            {showHourly && selDate && (
-              <div className="mt-3 bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <div className="px-3 py-2 bg-blue-50 rounded-t-lg border-b flex items-center justify-between">
-                  <h3 className="font-semibold text-blue-800 text-sm">📋 Почасовой отчёт: {formatDateFull(selDate)}</h3>
-                  <button onClick={() => setShowHourly(false)} className="text-gray-400 hover:text-gray-600">✕</button>
-                </div>
-                {hourlyLoading ? <div className="p-4 text-center"><div className="sp" /> Загрузка...</div> : hourlyData.length === 0 ? <div className="p-4 text-center text-gray-400">Нет почасовых данных</div> : (
-                  <table className="dt">
-                    <thead><tr><th>Время</th><th>🌡 Т</th><th>🌧 Осадки</th><th>💨 Ветер</th><th>💧 Влажн.</th><th>📊 Давл.</th><th>Погода</th></tr></thead>
-                    <tbody>{hourlyData.filter(h => h.time.startsWith(selDate)).map((h, i) => (
-                      <tr key={i}>
-                        <td className="font-medium">{h.time.split('T')[1]?.substring(0, 5)}</td>
-                        <td className={h.temp != null && h.temp > 30 ? 'text-red-600 font-medium' : h.temp != null && h.temp < 0 ? 'text-blue-600 font-medium' : ''}>{fmt(h.temp, 0)}°C</td>
-                        <td className={h.precip && h.precip > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(h.precip)}мм</td>
-                        <td>{fmt(h.windSpeed, 0)}км/ч</td>
-                        <td>{fmt(h.humidity, 0)}%</td>
-                        <td>{h.pressure ? (h.pressure / 100 * 0.75006).toFixed(1) : '—'}мм</td>
-                        <td><span className="mr-0.5">{getWeatherEmoji(h.weatherCode)}</span><span className="text-xs text-gray-500">{getWeatherDesc(h.weatherCode)}</span></td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ====== TAB 1: COMPARE ====== */}
-        {tab === 1 && (
-          <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-            {sortedDates.length === 0 ? (
-              <div className="p-6 text-center text-gray-400">Нет данных</div>
-            ) : (
-              <table className="dt">
-                <thead>
-                  <tr><th>Дата</th>{SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).map(s => (
-                    <th key={s.id} colSpan={params.length} className="text-center"><span className={s.color}>{s.name}</span></th>
-                  ))}</tr>
-                  <tr><th></th>{SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).flatMap(s =>
-                    params.map(pid => { const p = WEATHER_PARAMS.find(x => x.id === pid); return <th key={s.id + '-' + pid} className="text-xs">{p?.label}</th>; })
-                  )}</tr>
-                </thead>
-                <tbody>
-                  {sortedDates.map(date => (
-                    <tr key={date} onClick={() => clickDate(date)} className={'cursor-pointer ' + (selDate === date ? 'cur' : '')}>
-                      <td className="font-medium">{formatDate(date)}</td>
-                      {SOURCES.filter(s => latestByDate[sortedDates[0]]?.[s.id]).map(s => {
-                        const row = latestByDate[date]?.[s.id];
-                        if (!row) return params.map(pid => <td key={s.id + '-' + pid}>—</td>);
-                        return params.map(pid => {
-                          if (pid === 'precipSum') return <td key={s.id + '-' + pid}><span className={row.precipSum && row.precipSum > 0 ? 'text-blue-600 font-medium' : ''}>{fmt(row.precipSum)}</span></td>;
-                          return <td key={s.id + '-' + pid}>{fmtVal(row, pid)}</td>;
-                        });
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {/* ====== TAB 2: GARDEN/AGRO ====== */}
-        {tab === 2 && (
-          <div>
-            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-              <div className="text-xs text-gray-500 leading-relaxed">
-                <strong>Агрометеоданные</strong> для выращивания. Т почвы определяет всхожесть (5-15°C).
-                ЭТ₀ — испаряемость для оросительных норм. GDD — сумма эффективных температур.
-              </div>
-            </div>
-            {agroSortedDates.length === 0 ? (
-              <div className="p-6 text-center text-gray-400">Нет агроданных. Нажмите «Загрузить».</div>
-            ) : (
-              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <table className="dt"><thead>
-                  <tr><th>Дата</th><th>Источник</th><th>Д-до</th>{agroParams.map(pid => { const p = AGRO_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.icon}{p.label}</th> : null; })}</tr>
-                </thead><tbody>
-                  {agroSortedDates.flatMap((date: string) => agroByDate[date].map((row: any, i: number) => (
-                    <tr key={date + '-' + i}>
-                      {i === 0 && <td rowSpan={agroByDate[date].length} className="font-medium">{formatDate(date)}{date === todayStr() && <span className="ml-1 text-xs bg-green-100 text-green-700 px-1 rounded">сег.</span>}</td>}
-                      <td className="text-xs">{row.sourceName}</td>
-                      <td className="text-xs text-gray-400">{row.daysBefore >= 0 ? row.daysBefore + 'д' : '—'}</td>
-                      {agroParams.map(pid => (
-                        <td key={pid} className={pid === 'frostRisk' && row.frostRisk ? 'bg-blue-50' : pid === 'soilTemp6cm' && row.soilTemp6cm != null && row.soilTemp6cm < 5 ? 'bg-yellow-50' : ''}>
-                          {fmtAgro(row, pid)}
-                        </td>
-                      ))}
-                    </tr>
-                  )))}
-                </tbody></table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ====== TAB 3: ACCURACY ====== */}
-        {tab === 3 && (
-          <div>
-            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-              <div className="flex flex-wrap items-center gap-2 mb-2">
-                <button onClick={loadFactsNow} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">📊 Загрузить факты (60 дн.)</button>
-                {archFacts.length > 0 && <button onClick={() => setArchFacts([])} className="px-2 py-1 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200">🗑 Очистить</button>}
-                <span className="text-xs text-gray-400">Фактов: {archFacts.length} | Прогнозов: {locRows.length}</span>
-              </div>
-              <div className="text-xs text-gray-500 leading-relaxed">
-                <strong>Как это работает:</strong> Каждый день при открытии приложения прогнозы автоматически сохраняются. Для каждой даты накапливается до 10 прогнозов (с 10-дневного до 0-дневного срока). Загрузив фактические данные, вы увидите как менялась точность прогноза по мере приближения к дате.
-              </div>
-            </div>
-
-            {accuracyRows.length > 0 ? (
-              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <table className="dt">
-                  <thead>
-                    <tr><th>Дата</th><th>Факт Тмакс</th><th>Факт Осадки</th><th>Источник</th><th>Дней до</th><th>Прогн.Т</th><th>ΔТ</th><th>Пр/Факт</th></tr>
-                  </thead>
-                  <tbody>
-                    {accuracyRows.map(row => (
-                      row.predictions.map((pred, i) => (
-                        <tr key={row.date + '-' + i}>
-                          {i === 0 && <td rowSpan={row.predictions.length} className="font-medium">{formatDate(row.date)}</td>}
-                          {i === 0 && <td rowSpan={row.predictions.length}>{fmt(row.fact.tempMax, 0)}°C</td>}
-                          {i === 0 && <td rowSpan={row.predictions.length} className={row.fact.precipSum && row.fact.precipSum > 0 ? 'text-blue-600 font-bold' : ''}>{fmt(row.fact.precipSum)}мм</td>}
-                          <td className="text-xs">{pred.sourceName}</td>
-                          <td className="text-xs text-center">{pred.daysBefore >= 0 ? pred.daysBefore + 'д' : '—'}</td>
-                          <td>{pred.tempMax != null ? pred.tempMax.toFixed(1) : '—'}</td>
-                          <td className={(() => {
-                            if (pred.tempMax == null || row.fact.tempMax == null) return '';
-                            const e = Math.abs(pred.tempMax - row.fact.tempMax);
-                            return e <= 2 ? 'err-pos' : e <= 4 ? 'err-warn' : 'err-bad';
-                          })()}>
-                            {pred.tempMax != null && row.fact.tempMax != null ? ((pred.tempMax > row.fact.tempMax ? '+' : '') + (pred.tempMax - row.fact.tempMax).toFixed(1)) : '—'}
-                          </td>
-                          <td>
-                            <span className="text-gray-500">{pred.precipSum != null ? pred.precipSum.toFixed(1) : '—'}</span>
-                            <span className="text-gray-300">/</span>
-                            <span className="font-medium">{row.fact.precipSum?.toFixed(1) ?? '?'}</span>
-                          </td>
-                        </tr>
-                      ))
-                    ))}
-                  </tbody>
-                </table>
-                {/* Summary */}
-                {(() => {
-                  let sTE = 0, nT = 0, sPE = 0, nP = 0;
-                  const buckets: Record<string, { sTE: number; nT: number }> = {};
-                  for (const row of accuracyRows) {
-                    for (const pred of row.predictions) {
-                      const bk = Math.min(10, Math.max(0, pred.daysBefore)) + 'д';
-                      if (!buckets[bk]) buckets[bk] = { sTE: 0, nT: 0 };
-                      if (pred.tempMax != null && row.fact.tempMax != null) {
-                        const e = Math.abs(pred.tempMax - row.fact.tempMax);
-                        sTE += e; nT++;
-                        buckets[bk].sTE += e; buckets[bk].nT++;
-                      }
-                      if (pred.precipSum != null && row.fact.precipSum != null) { sPE += pred.precipSum - row.fact.precipSum; nP++; }
-                    }
-                  }
-                  if (nT === 0) return null;
-                  return (
-                    <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600">
-                      <span>MAE Т макс: <strong>{(sTE / nT).toFixed(1)}°C</strong></span>
-                      {nP > 0 && <span className="ml-3">Смещ. осадков: <strong>{(sPE / nP).toFixed(1)}мм</strong> ({sPE > 0 ? 'завышение' : 'занижение'})</span>}
-                      <div className="mt-1 flex flex-wrap gap-2">
-                        {Object.entries(buckets).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => (
-                          <span key={k} className="px-1.5 py-0.5 bg-white rounded border">{k}: {v.nT > 0 ? (v.sTE / v.nT).toFixed(1) + '°C' : '—'}</span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            ) : (
-              <div className="p-6 text-center text-gray-400">{locRows.length === 0 ? 'Сначала загрузите прогноз' : 'Нажмите "Загрузить факты" для анализа точности'}</div>
-            )}
-          </div>
-        )}
-
-        {/* ====== TAB 4: ARCHIVE ====== */}
-        {tab === 4 && (
-          <div>
-            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-              <div className="flex flex-wrap items-center gap-2 mb-2">
-                <div className="flex gap-1">
-                  <button onClick={() => setArchMode('r')} className={'px-2 py-1 rounded text-xs font-medium ' + (archMode === 'r' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600')}>Последние</button>
-                  <button onClick={() => setArchMode('c')} className={'px-2 py-1 rounded text-xs font-medium ' + (archMode === 'c' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600')}>Произвольный</button>
-                </div>
-                {archMode === 'r' ? (
-                  <div className="flex items-center gap-1"><span className="text-xs text-gray-500">Дней:</span>
-                    {[7, 14, 30, 60, 90].map(d => <button key={d} onClick={() => setArchDays(d)} className={'px-2 py-0.5 rounded text-xs ' + (archDays === d ? 'bg-green-100 text-green-700 font-medium' : 'text-gray-500 hover:bg-gray-100')}>{d}</button>)}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1 flex-wrap">
-                    <span className="text-xs text-gray-500">С:</span><input type="date" value={archS} onChange={e => setArchS(e.target.value)} className="px-2 py-1 border rounded text-xs" />
-                    <span className="text-xs text-gray-500">По:</span><input type="date" value={archE} onChange={e => setArchE(e.target.value)} className="px-2 py-1 border rounded text-xs" />
-                  </div>
-                )}
-                <button onClick={loadArch} className="px-3 py-1 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">{archL ? '...' : 'Загрузить'}</button>
-              </div>
-              <div className="text-xs text-gray-400">ECMWF IFS анализ (~9 км) — ближе к реальным данным станций, чем ERA5. Для Белореченска максимально точные данные — станция в родниках (WMO 37013).</div>
-            </div>
-            {archL ? <div className="p-6 text-center"><div className="sp" /> Загрузка...</div> : archData.length > 0 ? (
-              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <table className="dt">
-                  <thead><tr><th>Дата</th><th>Т макс</th><th>Т мин</th><th>Осадки</th><th>Осадки</th><th>Ветер</th><th>Источник</th></tr></thead>
-                  <tbody>{[...archData].reverse().map(d => (
-                    <tr key={d.date}>
-                      <td className="font-medium">{formatDate(d.date)}</td>
-                      <td className={d.tempMax != null && d.tempMax > 35 ? 'text-red-600 font-medium' : ''}>{fmt(d.tempMax)}°C</td>
-                      <td>{fmt(d.tempMin)}°C</td>
-                      <td className={d.precipSum != null && d.precipSum > 0 ? 'text-blue-600 font-bold' : ''}>{fmt(d.precipSum)}мм</td>
-                      <td><div className="pb-bar"><div className={'pb-fill ' + getPrecipClass(d.precipSum)} style={{ width: pbw(d.precipSum) + '%' }} /></div></td>
-                      <td>{fmt(d.windMax, 0)}км/ч</td>
-                      <td><span className={'text-xs px-1.5 py-0.5 rounded-full ' + (d.source === 'ecmwf_ifs' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700')}>{d.source === 'ecmwf_ifs' ? 'ECMWF IFS' : 'ERA5'}</span></td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-                <div className="px-3 py-2 bg-gray-50 border-t text-xs text-gray-600 flex flex-wrap gap-3">
-                  <span>{formatDate(archData[0]?.date)} — {formatDate(archData[archData.length - 1]?.date)}</span>
-                  <span>{archData.length} дн.</span>
-                  {(() => { const pp = archData.map(d => d.precipSum).filter((v): v is number => v != null); if (!pp.length) return null; const t = pp.reduce((a, b) => a + b, 0);
-                    return <><span>Σ: {t.toFixed(1)}мм</span><span>Макс: {Math.max(...pp).toFixed(1)}мм</span><span>Ср/дн: {(t / pp.length).toFixed(1)}мм</span></>;
-                  })()}
-                </div>
-              </div>
-            ) : <div className="p-6 text-center text-gray-400">Нажмите «Загрузить»</div>}
-          </div>
-        )}
-
-        {/* ====== TAB 5: SOURCES ====== */}
-        {tab === 5 && (
-          <div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div className="bg-white rounded-lg shadow-sm border p-3">
-                <h2 className="font-bold text-green-800 mb-2">Источники прогноза</h2>
-                <div className="space-y-2">
-                  {FORECAST_SOURCES.map(s => (
-                    <div key={s.id} className="p-2 rounded-lg border hover:bg-gray-50">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={'px-1.5 py-0.5 rounded text-white text-xs font-medium ' + s.bg}>{s.type === 'model' ? 'Модель' : 'Сервис'}</span>
-                        <span className="font-medium text-gray-800 text-sm">{s.name}</span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
-                        <div>Разрешение: <strong>{s.resolution}</strong></div>
-                        <div>Макс. дней: <strong>{s.maxDays}</strong></div>
-                        <div>Агро: {s.hasAgro ? '✅' : '—'}</div>
-                        <div>Покрытие: {s.coverage}</div>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">{s.note}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm border p-3">
-                <h2 className="font-bold text-blue-800 mb-2">Источники фактических данных</h2>
-                <div className="space-y-2">
-                  {FACT_SOURCES.map(s => (
-                    <div key={s.id} className="p-2 rounded-lg border hover:bg-gray-50">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={'px-1.5 py-0.5 rounded text-white text-xs font-medium ' + (s.type === 'station' ? 'bg-emerald-600' : s.type === 'reanalysis' ? 'bg-blue-600' : 'bg-indigo-600')}>
-                          {s.type === 'station' ? 'Станция' : s.type === 'reanalysis' ? 'Реанализ' : 'Анализ'}
-                        </span>
-                        <span className="font-medium text-gray-800 text-sm">{s.name}</span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
-                        <div>Архив с: <strong>{s.archiveStart}</strong></div>
-                        <div>Осадки: {s.precipAccuracy === 'excellent' ? '✅ Отлично' : s.precipAccuracy === 'good' ? '⚠️ Хорошо' : '❌ Смещены'}</div>
-                        <div>РФ: {s.russiaCoverage}</div>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">{s.note}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ====== TAB 6: OBSERVATIONS ====== */}
-        {tab === 6 && (
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex gap-2">
-                <button onClick={() => setObsOpen(!obsOpen)} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">➕ Добавить</button>
-                {observations.length > 0 && <button onClick={() => dlCSV(expCSV(observations), 'obs_' + todayStr() + '.csv')} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">📥 CSV</button>}
-              </div>
-              <span className="text-xs text-gray-400">{observations.length} зап.</span>
-            </div>
-            {obsOpen && (
-              <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
-                  {[{ k: 'date', l: 'Дата', t: 'date' }, { k: 'temp', l: '🌡 Т(°C)', t: 'text' }, { k: 'humidity', l: '💧 Влажн.(%)', t: 'text' }, { k: 'precip', l: '🌧 Осадки(мм)', t: 'text' }, { k: 'wind', l: '💨 Ветер(м/с)', t: 'text' }, { k: 'notes', l: '📝 Прим.', t: 'text' }].map(f => (
-                    <div key={f.k}><label className="text-xs text-gray-500 block mb-0.5">{f.l}</label>
-                      <input type={f.t} value={(obsForm as any)[f.k]} onChange={e => setObsForm(p => ({ ...p, [f.k]: e.target.value }))} className="w-full px-2 py-1.5 border rounded text-xs" /></div>
-                  ))}
-                </div>
-                <div className="mt-2 flex gap-2">
-                  <button onClick={addObsNow} className="px-3 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700">Сохранить</button>
-                  <button onClick={() => setObsOpen(false)} className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-xs font-medium">Отмена</button>
-                </div>
-              </div>
-            )}
-            {observations.length > 0 ? (
-              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
-                <table className="dt">
-                  <thead><tr><th>Дата</th><th>🌡Т</th><th>💧Вл.</th><th>🌧Ос</th><th>💨В</th><th>Прим.</th><th></th></tr></thead>
-                  <tbody>{observations.map(o => (
-                    <tr key={o.id}><td className="font-medium">{formatDate(o.date)}</td><td>{o.temp || '—'}</td><td>{o.humidity || '—'}</td><td className={parseFloat(o.precip) > 0 ? 'text-blue-600 font-medium' : ''}>{o.precip || '—'}</td><td>{o.wind || '—'}</td><td className="text-xs text-gray-500 max-w-xs truncate">{o.notes || '—'}</td><td><button onClick={() => { delObs(o.id); setObservations(loadObs()); }} className="text-red-400 hover:text-red-600">🗑</button></td></tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            ) : <div className="p-6 text-center text-gray-400">Нет наблюдений</div>}
-          </div>
-        )}
-
-        <footer className="mt-6 py-3 text-center text-xs text-gray-400 border-t">
-          <p>АгроПогода — Data-First архитектура: ECMWF IFS, GFS, ICON-EU (Open-Meteo)</p>
-          <p>Прогнозы сохраняются ежедневно, данные неизменяемы · {loc.lat.toFixed(4)}°N, {loc.lon.toFixed(4)}°E</p>
+        <footer className="text-center text-xs text-slate-400 pt-4 pb-8 space-y-1">
+          <p>Данные: ECMWF IFS, GFS, ICON-EU (Open-Meteo, бесплатно) · Автообновление: 06:00 и 18:00 МСК</p>
+          <p>Каждый снимок прогноза сохраняется в архив · 44.78°N, 40.12°E</p>
         </footer>
       </main>
+    </div>
+  );
+}
+
+/* ====== LOADING ====== */
+function LoadingScreen() {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 flex items-center justify-center">
+      <div className="text-center space-y-4">
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-green-400 to-emerald-600 flex items-center justify-center shadow-xl shadow-green-200/50 animate-pulse">
+          <Sprout className="text-white" size={28} />
+        </div>
+        <div className="space-y-2">
+          <div className="h-4 w-40 mx-auto bg-slate-200 rounded animate-pulse" />
+          <div className="h-3 w-56 mx-auto bg-slate-100 rounded animate-pulse" />
+        </div>
+        <p className="text-sm text-slate-400">Загрузка прогноза...</p>
+      </div>
+    </div>
+  );
+}
+
+/* ====== ERROR ====== */
+function ErrorScreen({ msg }: { msg: string }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 flex items-center justify-center p-4">
+      <div className="text-center max-w-sm bg-white rounded-2xl shadow-lg border border-slate-100 p-8">
+        <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-amber-50 flex items-center justify-center">
+          <AlertTriangle className="text-amber-500" size={28} />
+        </div>
+        <h2 className="text-lg font-semibold text-slate-700">{msg}</h2>
+        <p className="text-sm text-slate-400 mt-2">Данные появятся после первого автоматического обновления (06:00 / 18:00 MSK)</p>
+      </div>
+    </div>
+  );
+}
+
+/* ====== FORECAST TAB ====== */
+function ForecastTab({ today, dates, rowsByDateSource, activeSource, onSourceChange, expandedDay, onToggleDay }: {
+  today: ForecastRow | undefined; dates: string[]; rowsByDateSource: Record<string, Record<string, ForecastRow>>;
+  activeSource: string; onSourceChange: (s: string) => void;
+  expandedDay: string | null; onToggleDay: (d: string | null) => void;
+}) {
+  return (
+    <>
+      {/* Source selector */}
+      <div className="flex gap-2 flex-wrap">
+        {SOURCES.map(s => (
+          <button key={s.id} onClick={() => onSourceChange(s.id)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all border"
+            style={activeSource === s.id
+              ? { backgroundColor: s.bg, borderColor: s.border, color: s.color }
+              : { backgroundColor: '#fff', borderColor: '#e2e8f0', color: '#64748b' }
+            }>
+            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: activeSource === s.id ? s.color : '#cbd5e1' }} />
+            {s.name}
+          </button>
+        ))}
+      </div>
+
+      {/* Today hero card */}
+      {today && <TodayCard row={today} sourceName={SOURCES.find(s => s.id === activeSource)?.name || 'ECMWF IFS'} />}
+
+      {/* Forecast list */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+            <Calendar size={14} /> Прогноз на {dates.length} дней
+          </h2>
+          <span className="text-[11px] text-slate-400">{SOURCES.find(s => s.id === activeSource)?.name}</span>
+        </div>
+        <div className="divide-y divide-slate-50">
+          {dates.map(d => {
+            const r = rowsByDateSource[d]?.[activeSource];
+            if (!r) return null;
+            const isT = d === todayStr();
+            const isExp = expandedDay === d;
+            return (
+              <div key={d}>
+                <button
+                  onClick={() => onToggleDay(isExp ? null : d)}
+                  className={`w-full flex items-center gap-3 px-4 py-3 transition-colors text-left ${isT ? 'bg-emerald-50/60' : 'hover:bg-slate-50/80'}`}
+                >
+                  {/* Date */}
+                  <div className="w-24 shrink-0">
+                    <p className={`text-sm font-medium ${isT ? 'text-emerald-700' : 'text-slate-700'}`}>{fmtDate(d)}</p>
+                    <p className="text-[11px] text-slate-400">{fmtWeekday(d)}</p>
+                  </div>
+
+                  {/* Weather icon */}
+                  <div className="w-8 shrink-0 flex justify-center">{getWeatherIcon(r.weatherCode)}</div>
+
+                  {/* Temperature range bar */}
+                  <div className="flex items-center gap-2 w-40 shrink-0">
+                    <span className="text-xs text-slate-400 w-8 text-right">{fmtVal(r.tempMin, 0)}°</span>
+                    <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full"
+                        style={{
+                          width: r.tempMin != null && r.tempMax != null
+                            ? `${Math.min(100, Math.max(15, ((r.tempMax - r.tempMin + 15) / 55) * 100))}%`
+                            : '0%',
+                          background: 'linear-gradient(to right, #06b6d4, #f59e0b, #ef4444)',
+                        }} />
+                    </div>
+                    <span className={`text-sm font-semibold w-8 ${getTempColor(r.tempMax)}`}>{fmtVal(r.tempMax, 0)}°</span>
+                  </div>
+
+                  {/* Precipitation */}
+                  <div className="w-16 shrink-0 text-center">
+                    {r.precipSum != null && r.precipSum > 0
+                      ? <span className="text-xs font-medium text-blue-500">{fmtVal(r.precipSum, 1)} мм</span>
+                      : r.precipProb != null && r.precipProb > 0
+                        ? <span className="text-xs text-slate-400">{Math.round(r.precipProb)}%</span>
+                        : <span className="text-xs text-slate-200">—</span>
+                    }
+                  </div>
+
+                  {/* Wind */}
+                  <div className="w-16 shrink-0 text-center">
+                    {r.windMax != null
+                      ? <span className="text-xs text-slate-500">{fmtVal(r.windMax, 0)} км/ч</span>
+                      : <span className="text-xs text-slate-200">—</span>
+                    }
+                  </div>
+
+                  {/* Expand arrow */}
+                  <ChevronDown size={14} className={`text-slate-300 transition-transform shrink-0 ${isExp ? 'rotate-180' : ''}`} />
+                </button>
+
+                {/* Expanded details */}
+                {isExp && (
+                  <div className="px-4 pb-4 pt-0">
+                    <div className="bg-slate-50 rounded-xl p-4">
+                      <p className="text-xs text-slate-400 mb-3 font-medium">Подробности · {fmtDate(d)} {fmtWeekday(d)} · {wmoDesc(r.weatherCode)}</p>
+                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+                        <Stat icon={<Droplets size={14} className="text-blue-400" />} label="Влажность макс" value={r.humidityMax != null ? `${Math.round(r.humidityMax)}%` : '—'} />
+                        <Stat icon={<Droplets size={14} className="text-blue-300" />} label="Влажность мин" value={r.humidityMin != null ? `${Math.round(r.humidityMin)}%` : '—'} />
+                        <Stat icon={<Wind size={14} className="text-slate-400" />} label="Порывы ветра" value={r.windGusts != null ? `${fmtVal(r.windGusts, 0)} км/ч` : '—'} />
+                        <Stat icon={<Gauge size={14} className="text-slate-400" />} label="Давление" value={r.pressureMax != null ? `${fmtVal(r.pressureMax, 0)} гПа` : '—'} />
+                        <Stat icon={<Sun size={14} className="text-amber-400" />} label="УФ-индекс" value={r.uvIndexMax != null ? r.uvIndexMax.toFixed(1) : '—'} />
+                        <Stat icon={<Sprout size={14} className="text-emerald-500" />} label="ЭТ₀" value={r.et0 != null ? `${fmtVal(r.et0)} мм/д` : '—'} />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-center gap-1 text-slate-400">{icon} <span className="text-[10px]">{label}</span></div>
+      <p className="text-sm font-medium text-slate-700">{value}</p>
+    </div>
+  );
+}
+
+/* ====== TODAY CARD ====== */
+function TodayCard({ row, sourceName }: { row: ForecastRow; sourceName: string }) {
+  return (
+    <div className="bg-gradient-to-r from-emerald-500 via-green-500 to-teal-500 rounded-2xl p-5 text-white shadow-lg shadow-green-200/40">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-emerald-100 text-xs font-medium">Сегодня · {sourceName}</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-5xl font-light">{fmtVal(row.tempMax, 0)}°</span>
+            <span className="text-2xl font-light text-white/70">/ {fmtVal(row.tempMin, 0)}°</span>
+          </div>
+          <p className="text-emerald-100 text-sm mt-1">
+            {getWeatherIcon(row.weatherCode, 16)} <span className="inline-block align-middle ml-1">{wmoDesc(row.weatherCode)}</span>
+          </p>
+        </div>
+        <div className="text-right space-y-2 text-sm">
+          {row.precipSum != null && row.precipSum > 0 && (
+            <div className="flex items-center gap-1.5 justify-end"><CloudRain size={14} className="text-white/70" /> {fmtVal(row.precipSum, 1)} мм</div>
+          )}
+          {row.windMax != null && (
+            <div className="flex items-center gap-1.5 justify-end"><Wind size={14} className="text-white/70" /> {fmtVal(row.windMax, 0)} км/ч</div>
+          )}
+          {row.humidityMax != null && (
+            <div className="flex items-center gap-1.5 justify-end"><Droplets size={14} className="text-white/70" /> {Math.round(row.humidityMax)}%</div>
+          )}
+          {row.pressureMax != null && (
+            <div className="flex items-center gap-1.5 justify-end"><Gauge size={14} className="text-white/70" /> {fmtVal(row.pressureMax, 0)} гПа</div>
+          )}
+        </div>
+      </div>
+      {/* Mini stats */}
+      <div className="grid grid-cols-3 gap-4 mt-5 pt-4 border-t border-white/20">
+        <MiniBar label="Осадки" value={row.precipSum ?? 0} max={25} unit="мм" barColor="bg-blue-300" />
+        <MiniBar label="Ветер" value={row.windMax ?? 0} max={40} unit="км/ч" barColor="bg-yellow-300" />
+        <MiniBar label="Влажность" value={row.humidityMax ?? 0} max={100} unit="%" barColor="bg-cyan-300" />
+      </div>
+    </div>
+  );
+}
+
+function MiniBar({ label, value, max, unit, barColor }: { label: string; value: number; max: number; unit: string; barColor: string }) {
+  const pct = Math.min(100, (value / max) * 100);
+  return (
+    <div>
+      <div className="flex justify-between text-[11px] mb-1">
+        <span className="text-white/70">{label}</span>
+        <span className="font-medium">{typeof value === 'number' ? (value === 0 && label !== 'Влажность' ? '0' : value.toFixed(value >= 10 ? 0 : 1)) : value} {unit}</span>
+      </div>
+      <div className="h-1.5 bg-white/20 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${barColor} transition-all duration-500`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/* ====== COMPARE TAB ====== */
+function CompareTab({ dates, rowsByDateSource }: {
+  dates: string[]; rowsByDateSource: Record<string, Record<string, ForecastRow>>;
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-100">
+        <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+          <TrendingUp size={14} /> Сравнение моделей
+        </h2>
+        <p className="text-[11px] text-slate-400 mt-0.5">ECMWF IFS vs GFS vs ICON-EU — температуры и осадки</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="text-left py-2.5 px-4 font-semibold text-slate-500 text-xs">Дата</th>
+              {SOURCES.map(s => (
+                <th key={s.id} colSpan={3} className="text-center py-2.5 px-2 text-xs font-semibold" style={{ color: s.color }}>
+                  {s.name}
+                </th>
+              ))}
+            </tr>
+            <tr className="text-[10px] text-slate-400 border-b border-slate-50">
+              <th></th>
+              {SOURCES.map(s => (
+                <React.Fragment key={s.id}>
+                  <th>Макс</th><th>Мин</th><th>Ос</th>
+                </React.Fragment>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {dates.slice(0, 12).map(d => {
+              const hasAny = SOURCES.some(s => rowsByDateSource[d]?.[s.id]);
+              if (!hasAny) return null;
+              const isT = d === todayStr();
+              return (
+                <tr key={d} className={`border-b border-slate-50 ${isT ? 'bg-emerald-50/40' : 'hover:bg-slate-50/60'}`}>
+                  <td className={`py-2.5 px-4 text-xs font-medium ${isT ? 'text-emerald-700' : 'text-slate-600'}`}>
+                    {fmtDate(d)} <span className="text-slate-400">{fmtWeekday(d)}</span>
+                  </td>
+                  {SOURCES.map(s => {
+                    const r = rowsByDateSource[d]?.[s.id];
+                    if (!r) return (
+                      <React.Fragment key={s.id}>
+                        <td colSpan={3} className="text-center text-slate-200 text-xs py-2.5">—</td>
+                      </React.Fragment>
+                    );
+                    return (
+                      <React.Fragment key={s.id}>
+                        <td className={`text-center py-2.5 px-1.5 text-xs font-medium ${getTempColor(r.tempMax)}`}>{fmtVal(r.tempMax, 0)}°</td>
+                        <td className="text-center py-2.5 px-1.5 text-xs text-slate-500">{fmtVal(r.tempMin, 0)}°</td>
+                        <td className="text-center py-2.5 px-1.5 text-xs font-medium">
+                          {r.precipSum != null && r.precipSum > 0
+                            ? <span className="text-blue-500">{fmtVal(r.precipSum, 1)}</span>
+                            : <span className="text-slate-300">—</span>
+                          }
+                        </td>
+                      </React.Fragment>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ====== AGRO TAB ====== */
+function AgroTab({ dates, agroByDate }: {
+  dates: string[]; agroByDate: Record<string, Record<string, AgroRow>>;
+}) {
+  const primary = 'ecmwf_soil';
+
+  return (
+    <>
+      {/* Top cards: 3 days */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {dates.slice(0, 3).map(d => {
+          const r = agroByDate[d]?.[primary];
+          if (!r) return null;
+          const isT = d === todayStr();
+          return (
+            <div key={d} className={`bg-white rounded-2xl border shadow-sm p-4 ${isT ? 'border-emerald-200 ring-1 ring-emerald-100' : 'border-slate-200/80'}`}>
+              <div className="flex items-center justify-between mb-3">
+                <p className={`text-sm font-semibold ${isT ? 'text-emerald-700' : 'text-slate-700'}`}>
+                  {fmtDate(d)} <span className="text-slate-400 font-normal">{fmtWeekday(d)}</span>
+                </p>
+                {r.frostRisk && (
+                  <span className="text-[10px] font-medium bg-red-50 text-red-600 px-2 py-0.5 rounded-full flex items-center gap-0.5">
+                    <AlertTriangle size={10} /> Заморозки
+                  </span>
+                )}
+              </div>
+              <div className="space-y-2.5 text-xs">
+                <AgroStat label="Т почвы 6 см" value={fmtVal(r.soilTemp6cm, 1)} unit="°C" icon={<Thermometer size={12} className="text-orange-400" />} />
+                <AgroStat label="Т почвы 18 см" value={fmtVal(r.soilTemp18cm, 1)} unit="°C" icon={<Thermometer size={12} className="text-amber-400" />} />
+                <AgroStat label="Т почвы 54 см" value={fmtVal(r.soilTemp54cm, 1)} unit="°C" icon={<Thermometer size={12} className="text-yellow-500" />} />
+                <AgroStat label="Влажность почвы" value={fmtVal(r.soilMoisture07, 2)} unit="м³/м³" icon={<Droplets size={12} className="text-blue-400" />} />
+                <AgroStat label="ЭТ₀" value={fmtVal(r.et0Sum)} unit="мм/д" icon={<Sprout size={12} className="text-emerald-500" />} />
+                <AgroStat label="GDD (≥10°C)" value={fmtVal(r.growingDegreeDays)} unit="°C·д" icon={<Leaf size={12} className="text-green-500" />} />
+                <AgroStat label="Солн. радиация" value={fmtVal(r.solarRadiationSum)} unit="МДж/м²" icon={<Sun size={12} className="text-amber-400" />} />
+                <AgroStat label="Точка росы" value={fmtVal(r.dewPointMax)} unit="°C" icon={<Droplets size={12} className="text-cyan-400" />} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Agro table */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100">
+          <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+            <TreePine size={14} /> Полные агрометеоданные
+          </h2>
+          <p className="text-[11px] text-slate-400 mt-0.5">Температура почвы, влажность, ЭТ₀, GDD, риск заморозков</p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/50">
+                <th className="text-left py-2.5 px-3 font-semibold text-slate-500">Дата</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Т почвы<br/>6см</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Т почвы<br/>18см</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Т почвы<br/>54см</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Влажн.<br/>0-7</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Влажн.<br/>28-100</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">ЭТ₀</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Роса</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Солн.</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">GDD</th>
+                <th className="text-center py-2.5 px-2 font-semibold text-slate-500">Зам.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dates.map(d => {
+                const r = agroByDate[d]?.[primary];
+                if (!r) return null;
+                const isT = d === todayStr();
+                return (
+                  <tr key={d} className={`border-b border-slate-50 ${isT ? 'bg-emerald-50/40' : 'hover:bg-slate-50/60'}`}>
+                    <td className={`py-2.5 px-3 font-medium ${isT ? 'text-emerald-700' : 'text-slate-600'}`}>
+                      {fmtDate(d)} <span className="text-slate-400">{fmtWeekday(d)}</span>
+                    </td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.soilTemp6cm, 1)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.soilTemp18cm, 1)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.soilTemp54cm, 1)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.soilMoisture07, 2)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.soilMoisture28100, 2)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.et0Sum)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.dewPointMax)}</td>
+                    <td className="text-center py-2.5 px-2 text-slate-700">{fmtVal(r.solarRadiationSum)}</td>
+                    <td className="text-center py-2.5 px-2 font-medium text-slate-700">{fmtVal(r.growingDegreeDays)}</td>
+                    <td className="text-center py-2.5 px-2">
+                      {r.frostRisk
+                        ? <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-50"><AlertTriangle size={11} className="text-red-500" /></span>
+                        : <span className="text-emerald-400">✓</span>
+                      }
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function AgroStat({ icon, label, value, unit }: { icon: React.ReactNode; label: string; value: string; unit: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="flex items-center gap-1.5 text-slate-500">{icon} {label}</span>
+      <span className="font-medium text-slate-700">{value} <span className="text-slate-400 font-normal">{unit}</span></span>
+    </div>
+  );
+}
+
+/* ====== SOURCES TAB ====== */
+function SourcesTab() {
+  const forecast = [
+    { name: 'ECMWF IFS', org: 'ECMWF (Европа)', res: '9 км', days: '10', color: '#16a34a', bg: '#dcfce7', note: 'Лучшая глобальная модель. Осадки ~2x точнее ERA5.' },
+    { name: 'GFS', org: 'NWS (США)', res: '25 км', days: '16', color: '#2563eb', bg: '#dbeafe', note: 'Основная модель США. 16 дней прогноза.' },
+    { name: 'ICON-EU', org: 'DWD (Германия)', res: '6 км', days: '7', color: '#9333ea', bg: '#f3e8ff', note: 'Высочайшее разрешение для Европы и юга России.' },
+  ];
+  const api = { name: 'Open-Meteo', org: 'Агрегатор', color: '#0891b2', bg: '#cffafe', note: 'Бесплатный API, без ключа. Единый интерфейс для всех моделей.' };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100">
+          <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5"><Eye size={14} /> Источники прогноза</h2>
+        </div>
+        <div className="divide-y divide-slate-50">
+          {forecast.map(s => (
+            <div key={s.name} className="px-4 py-3.5 flex items-start gap-3">
+              <div className="w-3 h-3 rounded-full mt-0.5 shrink-0" style={{ backgroundColor: s.color }} />
+              <div className="flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-sm text-slate-800">{s.name}</span>
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full" style={{ backgroundColor: s.bg, color: s.color }}>Модель</span>
+                  <span className="text-[10px] text-slate-400">{s.res} · до {s.days} дн.</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-0.5">{s.org}</p>
+                <p className="text-xs text-slate-500 mt-1">{s.note}</p>
+              </div>
+            </div>
+          ))}
+          <div className="px-4 py-3.5 flex items-start gap-3">
+            <div className="w-3 h-3 rounded-full mt-0.5 shrink-0" style={{ backgroundColor: api.color }} />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-slate-800">{api.name}</span>
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full" style={{ backgroundColor: api.bg, color: api.color }}>API</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">{api.org}</p>
+              <p className="text-xs text-slate-500 mt-1">{api.note}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-4">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Архитектура проекта</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <ArchCard title="Data-First" desc="Прогнозы загружаются на сервере и сохраняются как JSON. Страница открывается мгновенно без клиентских API-вызовов." />
+          <ArchCard title="Auto-update" desc="GitHub Actions cron 2 раза в день (06:00 и 18:00 MSK). Данные обновляются, билдятся и деплоятся автоматически." />
+          <ArchCard title="Immutable Snapshots" desc="Каждый снимок прогноза сохраняется с таймстемпом. Данные неизменяемы — можно сравнить прогноз с фактом." />
+          <ArchCard title="Стек" desc="Next.js 14 (static export) + TypeScript + Tailwind CSS + Lucide Icons + GitHub Pages" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ArchCard({ title, desc }: { title: string; desc: string }) {
+  return (
+    <div className="bg-slate-50 rounded-xl p-3">
+      <p className="text-xs font-semibold text-slate-700 mb-1">{title}</p>
+      <p className="text-[11px] text-slate-500 leading-relaxed">{desc}</p>
     </div>
   );
 }
