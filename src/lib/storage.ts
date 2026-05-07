@@ -1,11 +1,12 @@
-import { ForecastRow, FactRow, GeoLocation, UserObservation } from './types';
+import { ForecastRow, AgroRow, FactRow, GeoLocation, UserObservation } from './types';
 
-/* ====== localStorage keys ====== */
 const K = {
   FORECASTS: 'ap_forecasts',
+  AGRO: 'ap_agro',
   FACTS: 'ap_facts',
   LOCATION: 'ap_location',
   PARAMS: 'ap_params',
+  AGRO_PARAMS: 'ap_agro_params',
   OBS: 'ap_obs',
   RECENT_CITIES: 'ap_recent_cities',
   CITY_SLUG: 'ap_city_slug',
@@ -18,37 +19,44 @@ function ss(key: string, v: any): void {
   try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
 }
 
-/* ====== Location ID helper ====== */
 export function locId(loc: { lat: number; lon: number }): string {
   return `${loc.lat.toFixed(2)}_${loc.lon.toFixed(2)}`;
 }
 
-/* ====== ForecastRow storage ====== */
-export function loadForecastRows(): ForecastRow[] {
-  return gs<ForecastRow[]>(K.FORECASTS) || [];
-}
-
+/* ====== ForecastRow ====== */
+export function loadForecastRows(): ForecastRow[] { return gs<ForecastRow[]>(K.FORECASTS) || []; }
 export function addForecastRows(newRows: ForecastRow[]): void {
   const existing = loadForecastRows();
   const existingIds = new Set(existing.map(r => r.id));
   let combined = [...existing, ...newRows.filter(r => !existingIds.has(r.id))];
-  /* keep snapshots from last 150 days to avoid localStorage overflow */
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 150);
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 120);
   const cutoffStr = cutoff.toISOString().split('T')[0];
   combined = combined.filter(r => r.snapshotDate >= cutoffStr);
   ss(K.FORECASTS, combined);
 }
-
 export function hasTodaySnapshot(lid: string): boolean {
   const rows = loadForecastRows();
   const today = todayStr();
   return rows.some(r => r.locationId === lid && r.snapshotDate === today);
 }
 
-/* ====== FactRow storage ====== */
-export function loadFactRows(): FactRow[] {
-  return gs<FactRow[]>(K.FACTS) || [];
+/* ====== AgroRow ====== */
+export function loadAgroRows(): AgroRow[] { return gs<AgroRow[]>(K.AGRO) || []; }
+export function addAgroRows(newRows: AgroRow[]): void {
+  const existing = loadAgroRows();
+  const existingIds = new Set(existing.map(r => r.id));
+  let combined = [...existing, ...newRows.filter(r => !existingIds.has(r.id))];
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 120);
+  const cutoffStr = cutoff.toISOString().split('T')[0];
+  combined = combined.filter(r => r.snapshotDate >= cutoffStr);
+  ss(K.AGRO, combined);
 }
+export function hasTodayAgroSnapshot(lid: string): boolean {
+  return loadAgroRows().some(r => r.locationId === lid && r.snapshotDate === todayStr());
+}
+
+/* ====== FactRow ====== */
+export function loadFactRows(): FactRow[] { return gs<FactRow[]>(K.FACTS) || []; }
 export function addFactRows(newRows: FactRow[]): void {
   const existing = loadFactRows();
   const existingIds = new Set(existing.map(r => r.id));
@@ -63,10 +71,12 @@ export const loadLocation = (): GeoLocation | null => gs<GeoLocation>(K.LOCATION
 /* ====== Params ====== */
 export const saveParams = (v: string[]) => ss(K.PARAMS, v);
 export const loadParams = (): string[] | null => gs<string[]>(K.PARAMS);
+export const saveAgroParams = (v: string[]) => ss(K.AGRO_PARAMS, v);
+export const loadAgroParams = (): string[] | null => gs<string[]>(K.AGRO_PARAMS);
 
 /* ====== Recent cities ====== */
 export const loadRecentCities = (): GeoLocation[] => gs<GeoLocation[]>(K.RECENT_CITIES) || [];
-function saveRecentCities(cities: GeoLocation[]): void { ss(K.RECENT_CITIES, cities.slice(0, 12)); }
+function saveRecentCities(cities: GeoLocation[]): void { ss(K.RECENT_CITIES, cities.slice(0, 15)); }
 export function addRecentCity(city: GeoLocation): void {
   const cities = loadRecentCities();
   const idx = cities.findIndex(c => locId(c) === locId(city));
@@ -75,7 +85,7 @@ export function addRecentCity(city: GeoLocation): void {
   saveRecentCities(cities);
 }
 
-/* ====== City slug (for Yandex) ====== */
+/* ====== City slug ====== */
 export const saveCitySlug = (v: string) => ss(K.CITY_SLUG, v);
 export const loadCitySlug = (): string | null => gs<string>(K.CITY_SLUG);
 
@@ -83,7 +93,7 @@ export const loadCitySlug = (): string | null => gs<string>(K.CITY_SLUG);
 export const loadObs = (): UserObservation[] => gs<UserObservation[]>(K.OBS) || [];
 export function addObs(o: UserObservation): void {
   const a = loadObs(); a.unshift(o);
-  if (a.length > 365) a.length = 365;
+  if (a.length > 500) a.length = 500;
   ss(K.OBS, a);
 }
 export function delObs(id: string): void { ss(K.OBS, loadObs().filter(o => o.id !== id)); }
@@ -116,9 +126,7 @@ export function fmt(v: number|null|undefined, dec: number = 1): string {
 }
 export function getPrecipClass(mm: number|null): string {
   if (mm == null || mm === 0) return 'pl';
-  if (mm < 5) return 'pl';
-  if (mm < 20) return 'pm';
-  return 'ph';
+  if (mm < 5) return 'pl'; if (mm < 20) return 'pm'; return 'ph';
 }
 export function pbw(v: number|null): number {
   return (v == null || v === 0) ? 0 : Math.min(100, Math.max(2, v * 2));

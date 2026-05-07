@@ -1,8 +1,9 @@
 'use client';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  GeoLocation, ForecastRow, FactRow, HourlyForecast, ArchiveDay, UserObservation,
-  WEATHER_PARAMS, DEFAULT_PARAMS, POPULAR_CITIES,
+  GeoLocation, ForecastRow, FactRow, HourlyForecast, ArchiveDay, UserObservation, AgroRow,
+  WEATHER_PARAMS, DEFAULT_PARAMS, AGRO_PARAMS, POPULAR_CITIES,
+  FORECAST_SOURCES, FACT_SOURCES,
   getWeatherDesc, getWeatherEmoji, WeatherParam,
 } from '@/lib/types';
 import {
@@ -12,8 +13,10 @@ import {
 import {
   locId, todayStr, daysAgo, formatDate, formatDateFull, fmt, getPrecipClass, pbw,
   loadForecastRows, addForecastRows, hasTodaySnapshot,
+  loadAgroRows, addAgroRows,
   loadFactRows, addFactRows, clearFacts,
   saveLocation, loadLocation, saveParams, loadParams,
+  saveAgroParams, loadAgroParams,
   loadRecentCities, addRecentCity, loadCitySlug,
   loadObs, addObs, delObs, gid, expCSV, dlCSV,
 } from '@/lib/storage';
@@ -29,6 +32,7 @@ const SOURCES = [
   { id: 'gfs',   name: 'GFS',       color: 'text-blue-700',  bg: 'bg-blue-600' },
   { id: 'icon',  name: 'ICON-EU',   color: 'text-purple-700', bg: 'bg-purple-600' },
   { id: 'yandex', name: 'Яндекс',   color: 'text-yellow-700', bg: 'bg-yellow-500' },
+  { id: 'yrno',   name: 'yr.no',     color: 'text-teal-700',   bg: 'bg-teal-600' },
 ];
 
 function fmtVal(row: ForecastRow, pid: string): string {
@@ -41,6 +45,16 @@ function fmtVal(row: ForecastRow, pid: string): string {
   return fmt(v) + ' ' + p.unit;
 }
 
+function fmtAgro(row: any, pid: string): string {
+  const p = AGRO_PARAMS.find(x => x.id === pid);
+  if (!p) return '—';
+  const v = row[p.key];
+  if (v == null) return '—';
+  if (pid === 'frostRisk') return v ? '❄️ Да' : '✅ Нет';
+  if (pid === 'growingDegreeDays') return v.toFixed(1);
+  return v.toFixed(2) + ' ' + p.unit;
+}
+
 export default function Home() {
   /* ====== Location ====== */
   const [loc, setLoc] = useState<GeoLocation>(DL);
@@ -51,6 +65,7 @@ export default function Home() {
 
   /* ====== Data (from storage) ====== */
   const [rows, setRows] = useState<ForecastRow[]>([]);
+  const [agroRows, setAgroRows] = useState<any[]>([]);
   const [facts, setFacts] = useState<FactRow[]>([]);
   const [observations, setObservations] = useState<UserObservation[]>([]);
   const [fetchStatus, setFetchStatus] = useState<'idle' | 'fetching' | 'done' | 'error'>('idle');
@@ -60,6 +75,7 @@ export default function Home() {
   /* ====== UI ====== */
   const [tab, setTab] = useState(0);
   const [params, setParams] = useState<string[]>(DEFAULT_PARAMS);
+  const [agroParams, setAgroParams] = useState<string[]>(['soilTemp6cm','soilTemp18cm','et0Sum','frostRisk','growingDegreeDays']);
   const [showPS, setShowPS] = useState(false);
   const [selDate, setSelDate] = useState<string | null>(null);
   const [selSource, setSelSource] = useState('ecmwf');
@@ -83,6 +99,7 @@ export default function Home() {
   /* ====== Data lifecycle ====== */
   const refreshData = useCallback(() => {
     setRows(loadForecastRows());
+    setAgroRows(loadAgroRows());
     setFacts(loadFactRows());
     setObservations(loadObs());
   }, []);
@@ -97,13 +114,14 @@ export default function Home() {
     setFetchStatus('fetching');
     setFetchMsg('Загрузка прогнозов...');
     try {
-      const newRows = await fetchAllForecasts(location);
-      if (newRows.length === 0) throw new Error('Нет данных от серверов');
-      addForecastRows(newRows);
+      const { forecastRows, agroRows: newAgro } = await fetchAllForecasts(location);
+      if (forecastRows.length === 0) throw new Error('Нет данных от серверов');
+      addForecastRows(forecastRows);
+      if (newAgro.length > 0) addAgroRows(newAgro);
       addRecentCity(location);
       refreshData();
       setFetchStatus('done');
-      setFetchMsg(`Сохранено ${newRows.length} записей (${todayStr()})`);
+      setFetchMsg(`Сохранено ${forecastRows.length} записей (${todayStr()})`);
       setLastSnap(todayStr());
     } catch (e: any) {
       setFetchStatus('error');
@@ -115,6 +133,7 @@ export default function Home() {
   useEffect(() => {
     const sl = loadLocation(); if (sl) setLoc(sl);
     const sp = loadParams(); if (sp) setParams(sp);
+    const sap2 = loadAgroParams(); if (sap2) setAgroParams(sap2);
     refreshData();
   }, [refreshData]);
 
@@ -157,6 +176,21 @@ export default function Home() {
 
   const sortedDates = useMemo(() => Object.keys(latestByDate).sort(), [latestByDate]);
 
+  const locAgro = useMemo(() => agroRows.filter((r: any) => r.locationId === locId(loc)), [agroRows, loc]);
+  const agroByDate = useMemo(() => {
+    const m: Record<string, any[]> = {};
+    for (const r of locAgro) {
+      if (!m[r.targetDate]) m[r.targetDate] = [];
+      const existing = m[r.targetDate].find((x: any) => x.sourceId === r.sourceId);
+      if (!existing || r.daysBefore <= existing.daysBefore) {
+        m[r.targetDate] = m[r.targetDate].filter((x: any) => x.sourceId !== r.sourceId);
+        m[r.targetDate].push(r);
+      }
+    }
+    return m;
+  }, [locAgro]);
+  const agroSortedDates = useMemo(() => Object.keys(agroByDate).sort(), [agroByDate]);
+
   /* ====== Accuracy rows ====== */
   const accuracyRows = useMemo(() => {
     const lid = locId(loc);
@@ -188,6 +222,7 @@ export default function Home() {
     setExpandDate(null); setShowHourly(false);
   };
   const togParam = (pid: string) => setParams(p => { const n = p.includes(pid) ? p.filter(x => x !== pid) : [...p, pid]; saveParams(n); return n; });
+  const togAgroParam = (pid: string) => setAgroParams(p => { const n = p.includes(pid) ? p.filter(x => x !== pid) : [...p, pid]; saveAgroParams(n); return n; });
   const clickDate = async (date: string) => {
     setSelDate(date === selDate ? null : date);
     if (date !== selDate) { setShowHourly(true); setHourlyLoading(true); setHourlyData([]); }
@@ -232,8 +267,8 @@ export default function Home() {
   const showSuggestions = searchOpen && (sq.length < 2 ? (recentCities.length > 0 || POPULAR_CITIES.length > 0) : sr.length > 0);
 
   /* ====== Tabs ====== */
-  const TABS = ['Прогноз', 'Сравнение', 'Точность', 'Архив', 'Наблюдения'];
-  const TIC = ['🌡', '📊', '🎯', '📅', '📝'];
+  const TABS = ['Прогноз', 'Сравнение', 'Сад/Огород', 'Точность', 'Архив', 'Источники', 'Наблюдения'];
+  const TIC = ['🌡', '📊', '🌱', '🎯', '📅', '📡', '📝'];
 
   /* ====== RENDER ====== */
   return (
@@ -255,6 +290,7 @@ export default function Home() {
               <span className="text-xs text-gray-400">Данные:</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
                 {rows.filter(r => r.locationId === locId(loc)).length} зап.
+                {agroRows.length > 0 && <span className="ml-1 text-emerald-600">🌱 {agroRows.length} агро</span>}
                 {lastSnap && <span className="text-green-600 ml-1">→ {lastSnap}</span>}
               </span>
               <button onClick={() => doFetch(loc, true)} disabled={fetchStatus === 'fetching'}
@@ -498,8 +534,42 @@ export default function Home() {
           </div>
         )}
 
-        {/* ====== TAB 2: ACCURACY ====== */}
+        {/* ====== TAB 2: GARDEN/AGRO ====== */}
         {tab === 2 && (
+          <div>
+            <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
+              <div className="text-xs text-gray-500 leading-relaxed">
+                <strong>Агрометеоданные</strong> для выращивания. Т почвы определяет всхожесть (5-15°C).
+                ЭТ₀ — испаряемость для оросительных норм. GDD — сумма эффективных температур.
+              </div>
+            </div>
+            {agroSortedDates.length === 0 ? (
+              <div className="p-6 text-center text-gray-400">Нет агроданных. Нажмите «Загрузить».</div>
+            ) : (
+              <div className="bg-white rounded-lg shadow-sm border overflow-x-auto">
+                <table className="dt"><thead>
+                  <tr><th>Дата</th><th>Источник</th><th>Д-до</th>{agroParams.map(pid => { const p = AGRO_PARAMS.find(x => x.id === pid); return p ? <th key={pid}>{p.icon}{p.label}</th> : null; })}</tr>
+                </thead><tbody>
+                  {agroSortedDates.flatMap((date: string) => agroByDate[date].map((row: any, i: number) => (
+                    <tr key={date + '-' + i}>
+                      {i === 0 && <td rowSpan={agroByDate[date].length} className="font-medium">{formatDate(date)}{date === todayStr() && <span className="ml-1 text-xs bg-green-100 text-green-700 px-1 rounded">сег.</span>}</td>}
+                      <td className="text-xs">{row.sourceName}</td>
+                      <td className="text-xs text-gray-400">{row.daysBefore >= 0 ? row.daysBefore + 'д' : '—'}</td>
+                      {agroParams.map(pid => (
+                        <td key={pid} className={pid === 'frostRisk' && row.frostRisk ? 'bg-blue-50' : pid === 'soilTemp6cm' && row.soilTemp6cm != null && row.soilTemp6cm < 5 ? 'bg-yellow-50' : ''}>
+                          {fmtAgro(row, pid)}
+                        </td>
+                      ))}
+                    </tr>
+                  )))}
+                </tbody></table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ====== TAB 3: ACCURACY ====== */}
+        {tab === 3 && (
           <div>
             <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
               <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -581,8 +651,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* ====== TAB 3: ARCHIVE ====== */}
-        {tab === 3 && (
+        {/* ====== TAB 4: ARCHIVE ====== */}
+        {tab === 4 && (
           <div>
             <div className="bg-white rounded-lg shadow-sm border p-3 mb-3">
               <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -632,8 +702,57 @@ export default function Home() {
           </div>
         )}
 
-        {/* ====== TAB 4: OBSERVATIONS ====== */}
-        {tab === 4 && (
+        {/* ====== TAB 5: SOURCES ====== */}
+        {tab === 5 && (
+          <div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="bg-white rounded-lg shadow-sm border p-3">
+                <h2 className="font-bold text-green-800 mb-2">Источники прогноза</h2>
+                <div className="space-y-2">
+                  {FORECAST_SOURCES.map(s => (
+                    <div key={s.id} className="p-2 rounded-lg border hover:bg-gray-50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={'px-1.5 py-0.5 rounded text-white text-xs font-medium ' + s.bg}>{s.type === 'model' ? 'Модель' : 'Сервис'}</span>
+                        <span className="font-medium text-gray-800 text-sm">{s.name}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
+                        <div>Разрешение: <strong>{s.resolution}</strong></div>
+                        <div>Макс. дней: <strong>{s.maxDays}</strong></div>
+                        <div>Агро: {s.hasAgro ? '✅' : '—'}</div>
+                        <div>Покрытие: {s.coverage}</div>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">{s.note}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg shadow-sm border p-3">
+                <h2 className="font-bold text-blue-800 mb-2">Источники фактических данных</h2>
+                <div className="space-y-2">
+                  {FACT_SOURCES.map(s => (
+                    <div key={s.id} className="p-2 rounded-lg border hover:bg-gray-50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={'px-1.5 py-0.5 rounded text-white text-xs font-medium ' + (s.type === 'station' ? 'bg-emerald-600' : s.type === 'reanalysis' ? 'bg-blue-600' : 'bg-indigo-600')}>
+                          {s.type === 'station' ? 'Станция' : s.type === 'reanalysis' ? 'Реанализ' : 'Анализ'}
+                        </span>
+                        <span className="font-medium text-gray-800 text-sm">{s.name}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
+                        <div>Архив с: <strong>{s.archiveStart}</strong></div>
+                        <div>Осадки: {s.precipAccuracy === 'excellent' ? '✅ Отлично' : s.precipAccuracy === 'good' ? '⚠️ Хорошо' : '❌ Смещены'}</div>
+                        <div>РФ: {s.russiaCoverage}</div>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">{s.note}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ====== TAB 6: OBSERVATIONS ====== */}
+        {tab === 6 && (
           <div>
             <div className="flex items-center justify-between mb-3">
               <div className="flex gap-2">
